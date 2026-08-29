@@ -16,6 +16,11 @@ from jaqsi import (
 )
 from jaqsi.operations import (
     Operation,
+    Hermitian,
+    ParametrizedHamiltonian,
+    # noise channels
+)
+from jaqsi.gateset import (
     H,
     CX,
     CCX,
@@ -32,10 +37,11 @@ from jaqsi.operations import (
     PauliY,
     PauliZ,
     Id,
-    Hermitian,
-    ParametrizedHamiltonian,
+)
+from jaqsi.paulis import (
     prod,
-    # noise channels
+)
+from jaqsi.noise import (
     BitFlip,
     PhaseFlip,
     DepolarizingChannel,
@@ -2366,7 +2372,7 @@ class TestPulse:
                 PulseGates.RX(w, wires=0, pulse_params=pp)
 
             def target_circuit(w):
-                from jaqsi.operations import RX as OpRX
+                from jaqsi.gateset import RX as OpRX
 
                 OpRX(w, wires=0)
 
@@ -2405,7 +2411,7 @@ class TestPulse:
                 PulseGates.RZ(w, wires=0, pulse_params=pp)
 
             def target_circuit(w):
-                from jaqsi.operations import RZ as OpRZ
+                from jaqsi.gateset import RZ as OpRZ
 
                 OpRZ(w, wires=0)
 
@@ -2560,7 +2566,7 @@ class TestPulse:
                 PulseGates.RX(w, wires=0, pulse_params=pp)
 
             def target_circuit(theta):
-                from jaqsi.operations import RX as OpRX
+                from jaqsi.gateset import RX as OpRX
 
                 OpRX(theta, wires=0)
 

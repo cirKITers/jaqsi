@@ -5,7 +5,7 @@ import pennylane as qml
 import pytest
 
 from jaqsi.script import Script
-from jaqsi.operations import RX, RY, CX
+from jaqsi.gateset import RX, RY, CX
 from jaqsi.math import (
     quantum_fisher_information,
     fubini_study_metric,

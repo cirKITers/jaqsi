@@ -10,9 +10,11 @@ import itertools
 import numpy as np
 import pytest
 
-from jaqsi.operations import (
+from jaqsi.paulis import (
     PauliWord,
     state_expectation,
+)
+from jaqsi.gateset import (
     H,
     S,
     CX,
@@ -23,6 +25,8 @@ from jaqsi.operations import (
     PauliY,
     PauliZ,
     PauliRot,
+)
+from jaqsi.operations import (
     _embed_matrix,
 )
 

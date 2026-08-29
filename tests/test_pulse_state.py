@@ -84,7 +84,7 @@ def test_set_envelope_evicts_stale_solver_cache():
         PulseGates.RX(w, wires=0, pulse_params=pp)
 
     def target_circuit(w):
-        from jaqsi.operations import RX as OpRX
+        from jaqsi.gateset import RX as OpRX
 
         OpRX(w, wires=0)
 
