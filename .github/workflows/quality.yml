@@ -19,7 +19,7 @@ jobs:
         run: pipx run uv sync --group dev
       - name: Lint with ruff
         run: |
-          pipx run uv run ruff check qml_essentials
+          pipx run uv run ruff check jaqsi
           pipx run uv run ruff check tests
       - name: Running license check
         run: pipx run uv run licensecheck --zero --license mit
