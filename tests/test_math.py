@@ -4,10 +4,9 @@ import numpy as np
 import pennylane as qml
 import pytest
 
-from qml_essentials.model import Model
-from qml_essentials.script import Script
-from qml_essentials.operations import RX, RY, CX
-from qml_essentials.math import (
+from jaqsi.script import Script
+from jaqsi.operations import RX, RY, CX
+from jaqsi.math import (
     quantum_fisher_information,
     fubini_study_metric,
     fidelity,
@@ -77,19 +76,6 @@ def test_qfi_invalid_state_shape():
         )
 
 
-def test_qfi_model_state():
-    """End-to-end pure-state QFI differentiated through the JAQSI model."""
-    model = Model(n_qubits=2, n_layers=1, circuit_type="Hardware_Efficient")
-    model.execution_type = "state"
-
-    F = quantum_fisher_information(lambda p: model(params=p), model.params)
-
-    P = model.params.size
-    assert F.shape == (P, P)
-    assert jnp.allclose(F, F.T, atol=1e-7)
-    assert jnp.min(jnp.linalg.eigvalsh(F)) >= -1e-6
-
-
 @pytest.mark.parametrize("theta", [0.0, 0.7, 1.3, jnp.pi / 2])
 def test_fubini_study_single_ry(theta):
     """Fubini-Study metric of a single RY is QFI/4 = [[0.25]] for any angle."""
@@ -115,35 +101,6 @@ def test_fubini_study_rejects_density():
 
     with pytest.raises(ValueError):
         fubini_study_metric(rho_fn, jnp.array([0.7, 1.3]))
-
-
-def test_fubini_study_model_state():
-    """End-to-end Fubini-Study metric differentiated through the JAQSI model."""
-    model = Model(n_qubits=2, n_layers=1, circuit_type="Hardware_Efficient")
-    model.execution_type = "state"
-    params = model.params
-
-    g = fubini_study_metric(lambda p: model(params=p), params)
-    F = quantum_fisher_information(lambda p: model(params=p), params)
-
-    P = params.size
-    assert g.shape == (P, P)
-    assert jnp.allclose(F, 4.0 * g, atol=1e-7)
-
-
-def test_qfi_model_density():
-    """End-to-end mixed-state QFI for a noisy (density-matrix) model."""
-    model = Model(n_qubits=2, n_layers=1, circuit_type="Hardware_Efficient")
-    model.execution_type = "density"
-
-    F = quantum_fisher_information(
-        lambda p: model(params=p, noise_params={"BitFlip": 0.1}), model.params
-    )
-
-    P = model.params.size
-    assert F.shape == (P, P)
-    assert jnp.allclose(F, F.T, atol=1e-7)
-    assert jnp.min(jnp.linalg.eigvalsh(F)) >= -1e-6
 
 
 def test_qfi_jaqsi_circuit():

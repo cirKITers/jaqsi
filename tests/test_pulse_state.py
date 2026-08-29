@@ -2,8 +2,8 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from qml_essentials.pulses import PulseGates, PulseInformation
-from qml_essentials.jaqsi import Evolution, Script
+from jaqsi.pulses import PulseGates, PulseInformation
+from jaqsi import Evolution, Script
 
 jax.config.update("jax_enable_x64", True)
 
@@ -84,7 +84,7 @@ def test_set_envelope_evicts_stale_solver_cache():
         PulseGates.RX(w, wires=0, pulse_params=pp)
 
     def target_circuit(w):
-        from qml_essentials.operations import RX as OpRX
+        from jaqsi.operations import RX as OpRX
 
         OpRX(w, wires=0)
 
