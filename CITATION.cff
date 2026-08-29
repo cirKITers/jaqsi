@@ -20,12 +20,9 @@ authors:
     given-names: "Jonathan"
   - family-names: "Wahl"
     given-names: "Johannes"
-title: "QML Essentials"
-version: 0.2.3
+title: "JAQSI"
+version: 0.1.0
 date-released: 2026-08-28
-repository-code: "https://github.com/cirKITers/qml-essentials"
-url: "https://cirkiters.github.io/qml-essentials"
+repository-code: "https://github.com/cirKITers/jaqsi"
+url: "https://cirkiters.github.io/jaqsi"
 license: MIT
-identifiers:
-  - type: doi
-    value: 10.1109/QSW67625.2025.00035
