@@ -2,7 +2,8 @@ site_name: JAQSI
 site_url: https://cirkiters.github.io/jaqsi/
 nav:
   - index.md
-  - jaqsi.md
+  - usage.md
+  - training.md
   - pulses.md
   - noise.md
   - math_utils.md
