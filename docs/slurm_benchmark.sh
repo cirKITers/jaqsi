@@ -1,7 +1,7 @@
 #!/bin/bash
 # 
 # name of the job for better recognizing it in the queue overview
-#SBATCH --job-name=qml-essentials
+#SBATCH --job-name=jaqsi
 # 
 # define how many nodes we need
 #SBATCH --nodes=1
@@ -27,5 +27,5 @@
 module load compiler/llvm
 module load devel/python/3.12.3
 
-cd ~/qml-essentials
+cd ~/jaqsi
 uv run python docs/benchmarks.py
