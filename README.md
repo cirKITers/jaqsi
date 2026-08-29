@@ -44,27 +44,40 @@ Looking for quantum Fourier model tooling (ansaetze, expressibility, entangling 
 ## 📦 Package Structure
 
 The following diagram provides an overview on how the different components within this package depend on each other.
+`Gates` is the entry point for applying gates to a circuit and `Script` the one for executing it; everything below them is the machinery they dispatch to.
 
 ```mermaid
 flowchart LR
     jaqsi([JAQSI])
+    jaqsi --> jaqsi.gates([Gates])
     jaqsi --> jaqsi.script([Script])
-    jaqsi.script --> jaqsi.tape([Tape])
+    jaqsi --> jaqsi.qoc([Quantum Optimal Control])
+    jaqsi --> jaqsi.math([Math])
+    jaqsi --> jaqsi.paulis([Paulis])
+
+    jaqsi.gates --> jaqsi.unitary([UnitaryGates])
+    jaqsi.gates --> jaqsi.pulse([PulseGates])
+    jaqsi.qoc --> jaqsi.gates
+
     jaqsi.script --> jaqsi.simulation([Simulation])
     jaqsi.script --> jaqsi.memory([Memory])
     jaqsi.script --> jaqsi.drawing([Drawing])
-    jaqsi.simulation --> jaqsi.ops([Operations])
-    jaqsi --> jaqsi.gates([Gates])
-    jaqsi.gates --> jaqsi.unitary([UnitaryGates])
-    jaqsi.gates --> jaqsi.pulse([PulseGates])
-    jaqsi.unitary --> jaqsi.ops
+
     jaqsi.pulse --> jaqsi.evolution([Evolution])
     jaqsi.pulse --> jaqsi.envelope([PulseEnvelope])
     jaqsi.pulse --> jaqsi.pparams([PulseParams])
-    jaqsi.evolution --> jaqsi.ops
-    jaqsi --> jaqsi.qoc([Quantum Optimal Control])
-    jaqsi.qoc --> jaqsi.pulse
-    jaqsi --> jaqsi.math([Math])
+
+    jaqsi.unitary --> jaqsi.gateset([Gateset])
+    jaqsi.unitary --> jaqsi.noise([Noise])
+    jaqsi.simulation --> jaqsi.gateset
+    jaqsi.simulation --> jaqsi.noise
+    jaqsi.paulis --> jaqsi.gateset
+    jaqsi.evolution --> jaqsi.ops([Operations])
+    jaqsi.math --> jaqsi.ops
+
+    jaqsi.gateset --> jaqsi.ops
+    jaqsi.noise --> jaqsi.ops
+    jaqsi.ops --> jaqsi.tape([Tape])
 
     classDef l1 fill:#1f8f5a,stroke:#1f8f5a,color:#d4f7e8
     classDef l2 fill:#2fb170,stroke:#2fb170,color:#d4f7e8
@@ -74,9 +87,9 @@ flowchart LR
     linkStyle default stroke-width:2px
 
     class jaqsi l1
-    class jaqsi.script,jaqsi.gates,jaqsi.qoc,jaqsi.math l2
-    class jaqsi.tape,jaqsi.simulation,jaqsi.memory,jaqsi.drawing,jaqsi.unitary,jaqsi.pulse l3
-    class jaqsi.ops,jaqsi.evolution,jaqsi.envelope,jaqsi.pparams l4
+    class jaqsi.gates,jaqsi.script,jaqsi.qoc,jaqsi.math,jaqsi.paulis l2
+    class jaqsi.unitary,jaqsi.pulse,jaqsi.simulation,jaqsi.memory,jaqsi.drawing l3
+    class jaqsi.gateset,jaqsi.noise,jaqsi.ops,jaqsi.tape,jaqsi.evolution,jaqsi.envelope,jaqsi.pparams l4
 ```
 
 ## 🚧 Contributing
