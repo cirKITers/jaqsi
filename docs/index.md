@@ -23,7 +23,7 @@ or with the [uv package manager](https://github.com/astral-sh/uv):
 uv add jaqsi
 ```
 
-Once you have set things up, go ahead and checkout [how JAQSI works](jaqsi.md).
+Once you have set things up, go ahead and checkout [how to use JAQSI](usage.md).
 
 ```python
 import jaqsi
