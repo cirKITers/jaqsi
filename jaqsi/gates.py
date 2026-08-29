@@ -38,10 +38,13 @@ def Barrier(wires: Union[int, List[int]], *args, **kwargs):
 
 class Gates(metaclass=GatesMeta):
     """
-    Dynamic accessor for quantum Gates.
+    The entry point for applying gates to a circuit.
 
-    Routes calls like `Gates.RX(...)` to either `UnitaryGates` or `PulseGates`
-    depending on the `gate_mode` keyword (defaults to 'unitary').
+    Call gates as ``Gates.<Name>(...)`` inside a circuit function; the call is
+    routed to either `UnitaryGates` or `PulseGates` depending on the `pulse`
+    keyword.  Prefer this over calling the backends (`UnitaryGates`,
+    `PulseGates`) or the matrix-level classes in :mod:`jaqsi.gateset` directly,
+    so that the same circuit can run at either level.
 
     During circuit building, the pulse manager can be activated via
     `pulse_manager_context`, which slices the global model pulse parameters
@@ -50,16 +53,15 @@ class Gates(metaclass=GatesMeta):
 
     Parameters
     ----------
-    gate_mode : str, optional
-        Determines the backend. 'unitary' for UnitaryGates, 'pulse' for PulseGates.
-        Defaults to 'unitary'.
+    pulse : bool, optional
+        Whether to run the gate at pulse level (`PulseGates`) instead of as an
+        ideal unitary (`UnitaryGates`). Defaults to ``False``.
 
     Examples
     --------
     >>> Gates.RX(w, wires)
-    >>> Gates.RX(w, wires, gate_mode="unitary")
-    >>> Gates.RX(w, wires, gate_mode="pulse")
-    >>> Gates.RX(w, wires, pulse_params, gate_mode="pulse")
+    >>> Gates.RX(w, wires, pulse=True)
+    >>> Gates.RX(w, wires, pulse=True, pulse_params=pulse_params)
     """
 
     def __getattr__(self, gate_name):
@@ -73,7 +75,9 @@ class Gates(metaclass=GatesMeta):
         if gate_name == "Barrier":
             return Barrier(*args, **kwargs)
 
-        gate_mode = kwargs.pop("gate_mode", "unitary")
+        pulse = kwargs.pop("pulse", False)
+        if not isinstance(pulse, bool):
+            raise TypeError(f"'pulse' must be a bool, got {type(pulse).__name__}.")
 
         # Backend selection and kwargs filtering
         allowed_args = [
@@ -85,15 +89,11 @@ class Gates(metaclass=GatesMeta):
             "noise_params",
             "random_key",
         ]
-        if gate_mode == "unitary":
-            gate_backend = UnitaryGates
-        elif gate_mode == "pulse":
+        if pulse:
             gate_backend = PulseGates
             allowed_args += ["pulse_params"]
         else:
-            raise ValueError(
-                f"Unknown gate mode: {gate_mode}. Use 'unitary' or 'pulse'."
-            )
+            gate_backend = UnitaryGates
 
         if len(kwargs.keys() - allowed_args) > 0:
             # TODO: pulse params are always provided?
@@ -144,7 +144,7 @@ class Gates(metaclass=GatesMeta):
                 )
 
         # Pulse slicing + scaling
-        if gate_mode == "pulse" and isinstance(pulse_mgr, PulseParamManager):
+        if pulse and isinstance(pulse_mgr, PulseParamManager):
             n_params = PulseInformation.gate_by_name(gate_name).size
             scalers = pulse_mgr.get(n_params)
             base = PulseInformation.gate_by_name(gate_name).params

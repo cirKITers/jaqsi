@@ -19,7 +19,7 @@ Recording a noise channel on the tape automatically switches `Script` from state
 
 ```python
 import jaqsi
-from jaqsi.gates import Gates
+from jaqsi import Gates
 
 noise_params = {
     "BitFlip": 0.01,

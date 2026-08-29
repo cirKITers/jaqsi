@@ -27,14 +27,18 @@ Once you have set things up, go ahead and checkout [how to use JAQSI](usage.md).
 
 ```python
 import jaqsi
+from jaqsi import Gates
 
 def circuit(theta):
-    jaqsi.Gates.RX(theta[0], wires=0)
-    jaqsi.Gates.CX(wires=[0, 1])
+    Gates.RX(theta[0], wires=0)
+    Gates.CX(wires=[0, 1])
 
 script = jaqsi.Script(circuit, n_qubits=2)
 script.execute(type="expval", obs=[jaqsi.PauliZ(wires=0)], args=(theta,))
 ```
+
+`Gates` is the entry point for applying gates: it records them on the circuit tape, attaches
+any noise you ask for, and runs them as ideal unitaries or, with `pulse=True`, as real pulses.
 
 Beyond gate-level simulation, JAQSI can simulate circuits at the [pulse level](pulses.md) and tune pulse parameters with [quantum optimal control](references.md#quantum-optimal-control).
 

@@ -17,8 +17,7 @@ import jax.numpy as jnp
 import optax
 
 import jaqsi
-from jaqsi import operations as op
-from jaqsi.gates import Gates
+from jaqsi import Gates
 
 jax.config.update("jax_enable_x64", True)
 
@@ -30,7 +29,7 @@ def circuit(params):
 
 
 script = jaqsi.Script(circuit, n_qubits=2)
-obs = [op.PauliZ(wires=0)]
+obs = [jaqsi.PauliZ(wires=0)]
 
 
 def cost(params):
@@ -107,7 +106,7 @@ resulting evolution reproduces a target unitary.
 The cost is an infidelity between the pulse-level state and the ideal gate's state:
 
 ```python
-from jaqsi.pulses import PulseGates, PulseInformation
+from jaqsi.pulses import PulseInformation
 from jaqsi.math import fidelity
 
 theta = jnp.pi / 2
@@ -115,14 +114,14 @@ theta = jnp.pi / 2
 
 def target_state():
     def c(w):
-        op.RX(w, wires=0)
+        Gates.RX(w, wires=0)
 
     return jaqsi.Script(c, n_qubits=1).execute(type="state", args=(theta,))
 
 
 def pulse_state(pulse_params):
     def c(w, pp):
-        PulseGates.RX(w, wires=0, pulse_params=pp)
+        Gates.RX(w, wires=0, pulse=True, pulse_params=pp)
 
     return jaqsi.Script(c, n_qubits=1).execute(type="state", args=(theta, pulse_params))
 

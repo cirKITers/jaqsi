@@ -26,14 +26,14 @@ Execute with `type="state"` to obtain the pure-state QFI, or with `type="density
 ```python
 import jax.numpy as jnp
 from jaqsi.script import Script
-from jaqsi.gateset import RX, RY, CX
+from jaqsi import Gates
 from jaqsi.math import quantum_fisher_information, fubini_study_metric
 
 def state_fn(theta):
     def circuit(t):
-        RX(t[0], wires=0)
-        RY(t[1], wires=1)
-        CX(wires=[0, 1])
+        Gates.RX(t[0], wires=0)
+        Gates.RY(t[1], wires=1)
+        Gates.CX(wires=[0, 1])
     return Script(circuit, n_qubits=2).execute(type="state", args=(theta,))
 
 theta = jnp.array([0.7, 1.3])

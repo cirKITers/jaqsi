@@ -532,7 +532,7 @@ class Script:
         # take part in every cache key.
         gate_error = UnitaryGates.batch_gate_error
 
-        # Non-array kwargs (e.g. ``noise_params``, ``gate_mode``) change the
+        # Non-array kwargs (e.g. ``noise_params``, ``pulse``) change the
         # recorded circuit and are captured in the traced closure, so they have
         # to take part in both cache keys.
         cache_kwargs = make_hashable(

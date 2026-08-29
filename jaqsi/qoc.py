@@ -1915,34 +1915,34 @@ class QOC:
 
         return {
             "RX": _make_gate_pair(
-                lambda w, pp: Gates.RX(w, 0, pulse_params=pp, gate_mode="pulse"),
+                lambda w, pp: Gates.RX(w, 0, pulse_params=pp, pulse=True),
                 lambda w: gateset.RX(w, wires=0),
             ),
             "RY": _make_gate_pair(
-                lambda w, pp: Gates.RY(w, 0, pulse_params=pp, gate_mode="pulse"),
+                lambda w, pp: Gates.RY(w, 0, pulse_params=pp, pulse=True),
                 lambda w: gateset.RY(w, wires=0),
             ),
             "RZ": _make_gate_pair(
-                lambda w, pp: Gates.RZ(w, 0, pulse_params=pp, gate_mode="pulse"),
+                lambda w, pp: Gates.RZ(w, 0, pulse_params=pp, pulse=True),
                 lambda w: gateset.RZ(w, wires=0),
                 prep=lambda w: gateset.H(wires=0),
                 post=lambda w: gateset.H(wires=0),
             ),
             "H": _make_gate_pair(
-                lambda w, pp: Gates.H(0, pulse_params=pp, gate_mode="pulse"),
+                lambda w, pp: Gates.H(0, pulse_params=pp, pulse=True),
                 lambda w: gateset.H(wires=0),
                 prep=lambda w: gateset.RY(w, wires=0),
             ),
             "Rot": _make_gate_pair(
                 lambda w, pp: Gates.Rot(
-                    w, w * 2, w * 3, 0, pulse_params=pp, gate_mode="pulse"
+                    w, w * 2, w * 3, 0, pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.Rot(w, w * 2, w * 3, wires=0),
                 prep=lambda w: gateset.H(wires=0),
             ),
             "CX": _make_gate_pair(
                 lambda w, pp: Gates.CX(
-                    wires=[0, 1], pulse_params=pp, gate_mode="pulse"
+                    wires=[0, 1], pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.CX(wires=[0, 1]),
                 prep=_chain_gate_stages(
@@ -1952,7 +1952,7 @@ class QOC:
             ),
             "CY": _make_gate_pair(
                 lambda w, pp: Gates.CY(
-                    wires=[0, 1], pulse_params=pp, gate_mode="pulse"
+                    wires=[0, 1], pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.CY(wires=[0, 1]),
                 prep=_chain_gate_stages(
@@ -1962,7 +1962,7 @@ class QOC:
             ),
             "CZ": _make_gate_pair(
                 lambda w, pp: Gates.CZ(
-                    wires=[0, 1], pulse_params=pp, gate_mode="pulse"
+                    wires=[0, 1], pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.CZ(wires=[0, 1]),
                 prep=_chain_gate_stages(
@@ -1972,21 +1972,21 @@ class QOC:
             ),
             "CRX": _make_gate_pair(
                 lambda w, pp: Gates.CRX(
-                    w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
+                    w, wires=[0, 1], pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.CRX(w, wires=[0, 1]),
                 prep=lambda w: gateset.H(wires=0),
             ),
             "CRY": _make_gate_pair(
                 lambda w, pp: Gates.CRY(
-                    w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
+                    w, wires=[0, 1], pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.CRY(w, wires=[0, 1]),
                 prep=lambda w: gateset.H(wires=0),
             ),
             "CRZ": _make_gate_pair(
                 lambda w, pp: Gates.CRZ(
-                    w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
+                    w, wires=[0, 1], pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.CRZ(w, wires=[0, 1]),
                 prep=_chain_gate_stages(
@@ -2011,48 +2011,48 @@ class QOC:
 
         return {
             "RX": _make_gate_pair(
-                lambda w, pp: Gates.RX(w, wires=0, pulse_params=pp, gate_mode="pulse"),
+                lambda w, pp: Gates.RX(w, wires=0, pulse_params=pp, pulse=True),
                 lambda w: gateset.RX(w, wires=0),
             ),
             "RY": _make_gate_pair(
-                lambda w, pp: Gates.RY(w, wires=0, pulse_params=pp, gate_mode="pulse"),
+                lambda w, pp: Gates.RY(w, wires=0, pulse_params=pp, pulse=True),
                 lambda w: gateset.RY(w, wires=0),
             ),
             "RZ": _make_gate_pair(
-                lambda w, pp: Gates.RZ(w, wires=0, pulse_params=pp, gate_mode="pulse"),
+                lambda w, pp: Gates.RZ(w, wires=0, pulse_params=pp, pulse=True),
                 lambda w: gateset.RZ(w, wires=0),
             ),
             "H": _make_gate_pair(
-                lambda w, pp: Gates.H(0, pulse_params=pp, gate_mode="pulse"),
+                lambda w, pp: Gates.H(0, pulse_params=pp, pulse=True),
                 lambda w: gateset.H(wires=0),
             ),
             "CZ": _make_gate_pair(
                 lambda w, pp: Gates.CZ(
-                    wires=[0, 1], pulse_params=pp, gate_mode="pulse"
+                    wires=[0, 1], pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.CZ(wires=[0, 1]),
             ),
             "CX": _make_gate_pair(
                 lambda w, pp: Gates.CX(
-                    wires=[0, 1], pulse_params=pp, gate_mode="pulse"
+                    wires=[0, 1], pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.CX(wires=[0, 1]),
             ),
             "CRX": _make_gate_pair(
                 lambda w, pp: Gates.CRX(
-                    w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
+                    w, wires=[0, 1], pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.CRX(w, wires=[0, 1]),
             ),
             "CRY": _make_gate_pair(
                 lambda w, pp: Gates.CRY(
-                    w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
+                    w, wires=[0, 1], pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.CRY(w, wires=[0, 1]),
             ),
             "CRZ": _make_gate_pair(
                 lambda w, pp: Gates.CRZ(
-                    w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
+                    w, wires=[0, 1], pulse_params=pp, pulse=True
                 ),
                 lambda w: gateset.CRZ(w, wires=[0, 1]),
             ),
@@ -2106,7 +2106,7 @@ class QOC:
         def pulse_circuit(w, pulse_params):
             gateset.H(wires=0)
             gateset.H(wires=1)
-            Gates.CPhase(w, wires=[0, 1], pulse_params=pulse_params, gate_mode="pulse")
+            Gates.CPhase(w, wires=[0, 1], pulse_params=pulse_params, pulse=True)
 
         def target_circuit(w):
             gateset.H(wires=0)
