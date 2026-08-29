@@ -31,9 +31,10 @@ from jaqsi.operations import (
     Hamiltonian,
     Hermitian,
     ParametrizedHamiltonian,
-    build_parity_observable,
     cdtype,
-    # Gate zoo (the full set stays reachable via ``jaqsi.operations``).
+)
+from jaqsi.gateset import (
+    # Gate zoo (the full set stays reachable via ``jaqsi.gateset``).
     Id,
     PauliX,
     PauliY,
@@ -51,7 +52,17 @@ from jaqsi.operations import (
     DiagonalQubitUnitary,
     PauliRot,
     Barrier,
-    # Noise channels.
+    build_parity_observable,
+)
+from jaqsi.paulis import (
+    PauliWord,
+    pauli_decompose,
+    pauli_string_from_operation,
+    prod,
+    state_expectation,
+    evolve_pauli_with_clifford,
+)
+from jaqsi.noise import (
     KrausChannel,
     BitFlip,
     PhaseFlip,
@@ -60,13 +71,6 @@ from jaqsi.operations import (
     PhaseDamping,
     ThermalRelaxationError,
     QubitChannel,
-    # Symbolic Pauli algebra.
-    PauliWord,
-    pauli_decompose,
-    pauli_string_from_operation,
-    prod,
-    state_expectation,
-    evolve_pauli_with_clifford,
 )
 from jaqsi.tape import (
     recording,
@@ -99,6 +103,9 @@ from jaqsi.utils import safe_random_split
 
 from jaqsi import (  # noqa: F401  (submodule access: ``from jaqsi import operations``)
     operations,
+    gateset,
+    paulis,
+    noise,
     math,
     simulation,
     memory,

@@ -14,12 +14,14 @@ import jax.numpy as jnp
 import numpy as np  # needed to prevent jitting some operations
 
 from jaqsi.operations import (
-    Barrier,
     Operation,
-    KrausChannel,
     _einsum_subscript,
     cdtype,
 )
+from jaqsi.gateset import (
+    Barrier,
+)
+from jaqsi.noise import KrausChannel
 
 
 def infer_n_qubits(ops: List[Operation], obs: List[Operation]) -> int:
@@ -44,7 +46,7 @@ def uses_density(tape: List[Operation], type: str) -> bool:
 
     Density-matrix simulation is needed when the caller explicitly requests the
     ``"density"`` measurement type, or when the tape contains a noise channel
-    (a :class:`~jaqsi.operations.KrausChannel`).
+    (a :class:`~jaqsi.noise.KrausChannel`).
 
     Args:
         tape: Ordered list of gate/channel operations.

@@ -13,7 +13,7 @@ from jaqsi.pulses import (
     PulseInformation,
     PulseParamManager,
 )
-from jaqsi.operations import Barrier as BarrierOp
+from jaqsi.gateset import Barrier as BarrierOp
 
 import logging
 

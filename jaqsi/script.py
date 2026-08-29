@@ -4,7 +4,8 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 
-from jaqsi.operations import Operation, KrausChannel
+from jaqsi.operations import Operation
+from jaqsi.noise import KrausChannel
 from jaqsi.tape import recording, pulse_recording
 from jaqsi.drawing import draw_text, draw_mpl, draw_tikz
 from jaqsi.unitary import UnitaryGates

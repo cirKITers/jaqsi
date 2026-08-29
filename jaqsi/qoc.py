@@ -14,6 +14,7 @@ from jaqsi.script import Script
 from jaqsi.evolution import Evolution
 from jaqsi.gates import Gates, PulseInformation, PulseEnvelope
 from jaqsi import operations as op
+from jaqsi import gateset
 from jaqsi.math import phase_difference, fidelity
 
 jax.config.update("jax_enable_x64", True)
@@ -54,7 +55,7 @@ def _with_basis_prep(circuit_fn: Callable, k: int, n_wires: int) -> Callable:
     def prepared(*args, **kwargs):
         for i, bit in enumerate(bits):
             if bit:
-                op.PauliX(wires=i)
+                gateset.PauliX(wires=i)
         circuit_fn(*args, **kwargs)
 
     prepared.__name__ = f"basis{k}_{circuit_fn.__name__}"
@@ -1798,7 +1799,7 @@ class QOC:
                 def _with_plus_prep(circuit_fn):
                     def prepared(*args, **kwargs):
                         for q in range(wires):
-                            op.H(wires=q)
+                            gateset.H(wires=q)
                         circuit_fn(*args, **kwargs)
 
                     prepared.__name__ = f"plus_{circuit_fn.__name__}"
@@ -1899,7 +1900,7 @@ class QOC:
     #
     # Each entry maps a gate name to a ``(pulse_circuit, target_circuit)``
     # pair.  The per-gate variants prepend a symmetry-breaking
-    # preparation (e.g. ``op.H``/``op.RY``) so the *state-vector* cost
+    # preparation (e.g. ``gateset.H``/``gateset.RY``) so the *state-vector* cost
     # is sensitive to rotation-axis tilt.  The joint-mode variants drop
     # those preps because the unitary cost already captures axis tilt
     # without probe-state trickery (see :meth:`_create_joint_pair_for`).
@@ -1915,82 +1916,82 @@ class QOC:
         return {
             "RX": _make_gate_pair(
                 lambda w, pp: Gates.RX(w, 0, pulse_params=pp, gate_mode="pulse"),
-                lambda w: op.RX(w, wires=0),
+                lambda w: gateset.RX(w, wires=0),
             ),
             "RY": _make_gate_pair(
                 lambda w, pp: Gates.RY(w, 0, pulse_params=pp, gate_mode="pulse"),
-                lambda w: op.RY(w, wires=0),
+                lambda w: gateset.RY(w, wires=0),
             ),
             "RZ": _make_gate_pair(
                 lambda w, pp: Gates.RZ(w, 0, pulse_params=pp, gate_mode="pulse"),
-                lambda w: op.RZ(w, wires=0),
-                prep=lambda w: op.H(wires=0),
-                post=lambda w: op.H(wires=0),
+                lambda w: gateset.RZ(w, wires=0),
+                prep=lambda w: gateset.H(wires=0),
+                post=lambda w: gateset.H(wires=0),
             ),
             "H": _make_gate_pair(
                 lambda w, pp: Gates.H(0, pulse_params=pp, gate_mode="pulse"),
-                lambda w: op.H(wires=0),
-                prep=lambda w: op.RY(w, wires=0),
+                lambda w: gateset.H(wires=0),
+                prep=lambda w: gateset.RY(w, wires=0),
             ),
             "Rot": _make_gate_pair(
                 lambda w, pp: Gates.Rot(
                     w, w * 2, w * 3, 0, pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.Rot(w, w * 2, w * 3, wires=0),
-                prep=lambda w: op.H(wires=0),
+                lambda w: gateset.Rot(w, w * 2, w * 3, wires=0),
+                prep=lambda w: gateset.H(wires=0),
             ),
             "CX": _make_gate_pair(
                 lambda w, pp: Gates.CX(
                     wires=[0, 1], pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.CX(wires=[0, 1]),
+                lambda w: gateset.CX(wires=[0, 1]),
                 prep=_chain_gate_stages(
-                    lambda w: op.RY(w, wires=0),
-                    lambda w: op.H(wires=1),
+                    lambda w: gateset.RY(w, wires=0),
+                    lambda w: gateset.H(wires=1),
                 ),
             ),
             "CY": _make_gate_pair(
                 lambda w, pp: Gates.CY(
                     wires=[0, 1], pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.CY(wires=[0, 1]),
+                lambda w: gateset.CY(wires=[0, 1]),
                 prep=_chain_gate_stages(
-                    lambda w: op.RX(w, wires=0),
-                    lambda w: op.H(wires=1),
+                    lambda w: gateset.RX(w, wires=0),
+                    lambda w: gateset.H(wires=1),
                 ),
             ),
             "CZ": _make_gate_pair(
                 lambda w, pp: Gates.CZ(
                     wires=[0, 1], pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.CZ(wires=[0, 1]),
+                lambda w: gateset.CZ(wires=[0, 1]),
                 prep=_chain_gate_stages(
-                    lambda w: op.RY(w, wires=0),
-                    lambda w: op.H(wires=1),
+                    lambda w: gateset.RY(w, wires=0),
+                    lambda w: gateset.H(wires=1),
                 ),
             ),
             "CRX": _make_gate_pair(
                 lambda w, pp: Gates.CRX(
                     w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.CRX(w, wires=[0, 1]),
-                prep=lambda w: op.H(wires=0),
+                lambda w: gateset.CRX(w, wires=[0, 1]),
+                prep=lambda w: gateset.H(wires=0),
             ),
             "CRY": _make_gate_pair(
                 lambda w, pp: Gates.CRY(
                     w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.CRY(w, wires=[0, 1]),
-                prep=lambda w: op.H(wires=0),
+                lambda w: gateset.CRY(w, wires=[0, 1]),
+                prep=lambda w: gateset.H(wires=0),
             ),
             "CRZ": _make_gate_pair(
                 lambda w, pp: Gates.CRZ(
                     w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.CRZ(w, wires=[0, 1]),
+                lambda w: gateset.CRZ(w, wires=[0, 1]),
                 prep=_chain_gate_stages(
-                    lambda w: op.H(wires=0),
-                    lambda w: op.H(wires=1),
+                    lambda w: gateset.H(wires=0),
+                    lambda w: gateset.H(wires=1),
                 ),
             ),
         }
@@ -2002,7 +2003,7 @@ class QOC:
         Used by :meth:`_create_joint_pair_for`: the unitary cost
         already exposes rotation-axis tilt without a probe state, and
         leaving the preps in actively *hides* certain errors (e.g.
-        ``op.H(wires=1)`` puts the target qubit of CX into a CX
+        ``gateset.H(wires=1)`` puts the target qubit of CX into a CX
         eigenstate, so the column-stacked unitary becomes insensitive
         to the pulse error).  ``Rot`` and ``CY`` are intentionally
         absent because the joint optimiser does not target them.
@@ -2011,49 +2012,49 @@ class QOC:
         return {
             "RX": _make_gate_pair(
                 lambda w, pp: Gates.RX(w, wires=0, pulse_params=pp, gate_mode="pulse"),
-                lambda w: op.RX(w, wires=0),
+                lambda w: gateset.RX(w, wires=0),
             ),
             "RY": _make_gate_pair(
                 lambda w, pp: Gates.RY(w, wires=0, pulse_params=pp, gate_mode="pulse"),
-                lambda w: op.RY(w, wires=0),
+                lambda w: gateset.RY(w, wires=0),
             ),
             "RZ": _make_gate_pair(
                 lambda w, pp: Gates.RZ(w, wires=0, pulse_params=pp, gate_mode="pulse"),
-                lambda w: op.RZ(w, wires=0),
+                lambda w: gateset.RZ(w, wires=0),
             ),
             "H": _make_gate_pair(
                 lambda w, pp: Gates.H(0, pulse_params=pp, gate_mode="pulse"),
-                lambda w: op.H(wires=0),
+                lambda w: gateset.H(wires=0),
             ),
             "CZ": _make_gate_pair(
                 lambda w, pp: Gates.CZ(
                     wires=[0, 1], pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.CZ(wires=[0, 1]),
+                lambda w: gateset.CZ(wires=[0, 1]),
             ),
             "CX": _make_gate_pair(
                 lambda w, pp: Gates.CX(
                     wires=[0, 1], pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.CX(wires=[0, 1]),
+                lambda w: gateset.CX(wires=[0, 1]),
             ),
             "CRX": _make_gate_pair(
                 lambda w, pp: Gates.CRX(
                     w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.CRX(w, wires=[0, 1]),
+                lambda w: gateset.CRX(w, wires=[0, 1]),
             ),
             "CRY": _make_gate_pair(
                 lambda w, pp: Gates.CRY(
                     w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.CRY(w, wires=[0, 1]),
+                lambda w: gateset.CRY(w, wires=[0, 1]),
             ),
             "CRZ": _make_gate_pair(
                 lambda w, pp: Gates.CRZ(
                     w, wires=[0, 1], pulse_params=pp, gate_mode="pulse"
                 ),
-                lambda w: op.CRZ(w, wires=[0, 1]),
+                lambda w: gateset.CRZ(w, wires=[0, 1]),
             ),
         }
 
@@ -2103,14 +2104,14 @@ class QOC:
         """Create pulse and target circuits for the CPhase gate."""
 
         def pulse_circuit(w, pulse_params):
-            op.H(wires=0)
-            op.H(wires=1)
+            gateset.H(wires=0)
+            gateset.H(wires=1)
             Gates.CPhase(w, wires=[0, 1], pulse_params=pulse_params, gate_mode="pulse")
 
         def target_circuit(w):
-            op.H(wires=0)
-            op.H(wires=1)
-            op.ControlledPhaseShift(w, wires=[0, 1])
+            gateset.H(wires=0)
+            gateset.H(wires=1)
+            gateset.ControlledPhaseShift(w, wires=[0, 1])
 
         return pulse_circuit, target_circuit
 

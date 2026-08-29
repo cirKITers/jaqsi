@@ -4,6 +4,8 @@ import jax.numpy as jnp
 import jax
 
 from jaqsi import operations as op
+from jaqsi import gateset
+from jaqsi import noise
 import logging
 
 from jaqsi.utils import safe_random_split
@@ -17,7 +19,7 @@ class UnitaryGates:
     batch_gate_error = True
 
     @staticmethod
-    def NQubitDepolarizingChannel(p: float, wires: List[int]) -> op.QubitChannel:
+    def NQubitDepolarizingChannel(p: float, wires: List[int]) -> noise.QubitChannel:
         """
         Generate Kraus operators for n-qubit depolarizing channel.
 
@@ -31,7 +33,7 @@ class UnitaryGates:
                 Must contain at least 2 qubits.
 
         Returns:
-            op.QubitChannel: QubitChannel with Kraus operators
+            noise.QubitChannel: QubitChannel with Kraus operators
                 representing the depolarizing noise channel.
 
         Raises:
@@ -45,9 +47,9 @@ class UnitaryGates:
                 raise ValueError(f"Number of qubits must be >= 2, got {n}")
 
             Id = jnp.eye(2)
-            X = op.PauliX._matrix
-            Y = op.PauliY._matrix
-            Z = op.PauliZ._matrix
+            X = gateset.PauliX._matrix
+            Y = gateset.PauliY._matrix
+            Z = gateset.PauliZ._matrix
             paulis = [Id, X, Y, Z]
 
             dim = 2**n
@@ -72,7 +74,9 @@ class UnitaryGates:
 
             return [K0] + kraus_ops
 
-        return op.QubitChannel(n_qubit_depolarizing_kraus(p, len(wires)), wires=wires)
+        return noise.QubitChannel(
+            n_qubit_depolarizing_kraus(p, len(wires)), wires=wires
+        )
 
     @staticmethod
     def Noise(
@@ -107,15 +111,15 @@ class UnitaryGates:
             for wire in wires:
                 bf = noise_params.get("BitFlip", 0.0)
                 if bf > 0:
-                    op.BitFlip(bf, wires=wire)
+                    noise.BitFlip(bf, wires=wire)
 
                 pf = noise_params.get("PhaseFlip", 0.0)
                 if pf > 0:
-                    op.PhaseFlip(pf, wires=wire)
+                    noise.PhaseFlip(pf, wires=wire)
 
                 dp = noise_params.get("Depolarizing", 0.0)
                 if dp > 0:
-                    op.DepolarizingChannel(dp, wires=wire)
+                    noise.DepolarizingChannel(dp, wires=wire)
 
             # noise on two-qubits
             if len(wires) > 1:
@@ -212,7 +216,7 @@ class UnitaryGates:
             phi, random_key = UnitaryGates.GateError(phi, noise_params, random_key)
             theta, random_key = UnitaryGates.GateError(theta, noise_params, random_key)
             omega, random_key = UnitaryGates.GateError(omega, noise_params, random_key)
-        op.Rot(phi, theta, omega, wires=wires)
+        gateset.Rot(phi, theta, omega, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -242,7 +246,7 @@ class UnitaryGates:
         """
         if noise_params is not None and "GateError" in noise_params:
             theta, random_key = UnitaryGates.GateError(theta, noise_params, random_key)
-        op.PauliRot(theta, pauli, wires=wires)
+        gateset.PauliRot(theta, pauli, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -265,7 +269,7 @@ class UnitaryGates:
             None: Gate and noise are applied in-place to the circuit.
         """
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        op.RX(w, wires=wires)
+        gateset.RX(w, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -288,7 +292,7 @@ class UnitaryGates:
             None: Gate and noise are applied in-place to the circuit.
         """
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        op.RY(w, wires=wires)
+        gateset.RY(w, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -311,7 +315,7 @@ class UnitaryGates:
             None: Gate and noise are applied in-place to the circuit.
         """
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        op.RZ(w, wires=wires)
+        gateset.RZ(w, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -334,7 +338,7 @@ class UnitaryGates:
             None: Gate and noise are applied in-place to the circuit.
         """
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        op.CRX(w, wires=wires)
+        gateset.CRX(w, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -357,7 +361,7 @@ class UnitaryGates:
             None: Gate and noise are applied in-place to the circuit.
         """
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        op.CRY(w, wires=wires)
+        gateset.CRY(w, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -380,7 +384,7 @@ class UnitaryGates:
             None: Gate and noise are applied in-place to the circuit.
         """
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        op.CRZ(w, wires=wires)
+        gateset.CRZ(w, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -405,7 +409,7 @@ class UnitaryGates:
             None: Gate and noise are applied in-place to the circuit.
         """
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        op.RXX(w, wires=wires)
+        gateset.RXX(w, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -430,7 +434,7 @@ class UnitaryGates:
             None: Gate and noise are applied in-place to the circuit.
         """
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        op.RYY(w, wires=wires)
+        gateset.RYY(w, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -455,7 +459,7 @@ class UnitaryGates:
             None: Gate and noise are applied in-place to the circuit.
         """
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        op.RZZ(w, wires=wires)
+        gateset.RZZ(w, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -481,7 +485,7 @@ class UnitaryGates:
             None: Gate and noise are applied in-place to the circuit.
         """
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        op.RZX(w, wires=wires)
+        gateset.RZX(w, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -507,7 +511,7 @@ class UnitaryGates:
             None: Gate and noise are applied in-place to the circuit.
         """
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        op.ControlledPhaseShift(w, wires=wires)
+        gateset.ControlledPhaseShift(w, wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -528,7 +532,7 @@ class UnitaryGates:
         Returns:
             None: Gate and noise are applied in-place to the circuit.
         """
-        op.CX(wires=wires)
+        gateset.CX(wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -549,7 +553,7 @@ class UnitaryGates:
         Returns:
             None: Gate and noise are applied in-place to the circuit.
         """
-        op.CY(wires=wires)
+        gateset.CY(wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -570,7 +574,7 @@ class UnitaryGates:
         Returns:
             None: Gate and noise are applied in-place to the circuit.
         """
-        op.CZ(wires=wires)
+        gateset.CZ(wires=wires)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -591,5 +595,5 @@ class UnitaryGates:
         Returns:
             None: Gate and noise are applied in-place to the circuit.
         """
-        op.H(wires=wires)
+        gateset.H(wires=wires)
         UnitaryGates.Noise(wires, noise_params)
