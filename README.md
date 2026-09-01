@@ -19,10 +19,6 @@ Beyond gate-level simulation, JAQSI simulates circuits at the pulse level by int
 ```
 pip install jaqsi
 ```
-or with the [uv package manager](https://github.com/astral-sh/uv):
-```
-uv add jaqsi
-```
 
 to install our package from [PyPI](https://pypi.org/project/jaqsi/).
 
@@ -39,7 +35,8 @@ script.execute(type="expval", obs=[jaqsi.PauliZ(wires=0)], args=(theta,))
 
 You can find details on how to use it and further documentation on the corresponding [Github Page](https://cirkiters.github.io/jaqsi/).
 
-Looking for quantum Fourier model tooling (ansaetze, expressibility, entangling capability, Fourier analysis) built on top of this simulator? See [qml-essentials](https://github.com/cirKITers/qml-essentials).
+Looking for quantum Fourier model tooling (ansaetze, expressibility, entangling capability, Fourier analysis) built on top of this simulator? 
+See [qml-essentials](https://github.com/cirKITers/qml-essentials).
 
 ## 📦 Package Structure
 
