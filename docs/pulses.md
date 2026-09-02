@@ -4,7 +4,7 @@ Our framework allows constructing circuits at the **pulse level**, where each ga
 This provides a more fine grained access to the simulation of the underlying physical process.
 While we provide a developer-oriented overview in this section, we would like to highlight [Tilmann's Bachelor's Thesis](https://doi.org/10.5445/IR/1000184129) if you want to have a more detailled read into pulse-level simulation and quantum Fourier models.
 
-Note that we support GPU-accelerate pulse level simulation, but keep in mind that Pulse-level ODE solves are latency-bound on a GPU.
+Note that we support GPU-accelerated pulse level simulation, but keep in mind that Pulse-level ODE solves are latency-bound on a GPU.
 This means that `jaqsi.Evolution.set_solver_defaults(host_offload=True)` keeps them on the CPU while the circuit runs on the GPU, which pays off below roughly a thousand solves per call (forward simulation and eager gradients; not inside a jitted gradient).
 The following three points can help you make a decision on when to run what on which device with or without the `host_offload` flag:
 - Small batch, low num. qubits: CPU-only is fastest. The flag makes the GPU the second-best option instead of the worst, but it cannot beat the CPU because the gate part is trivial and the offload adds a round trip.
