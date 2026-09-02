@@ -349,7 +349,7 @@ class Operation:
         Returns:
             A new :class:`Operation` with matrix ``U\\dagger`` acting on the same wires.
         """
-        mat = jnp.conj(self._matrix).T
+        mat = jnp.conj(self.matrix).T
         op = Operation(wires=self.wires, matrix=mat, record=False)
 
         self._update_tape_operation(op)
@@ -366,7 +366,7 @@ class Operation:
             A new :class:`Operation` with matrix ``U\\dagger`` acting on the same wires.
         """
         # TODO: support fractional powers
-        mat = jnp.linalg.matrix_power(self._matrix, power)
+        mat = jnp.linalg.matrix_power(self.matrix, power)
         op = Operation(wires=self.wires, matrix=mat, record=False)
 
         self._update_tape_operation(op)
@@ -388,7 +388,7 @@ class Operation:
         if isinstance(other, Operation):
             return self.__matmul__(other)
 
-        mat = other * self._matrix
+        mat = other * self.matrix
         op = Operation(wires=self.wires, matrix=mat, record=False)
 
         self._update_tape_operation(op)
