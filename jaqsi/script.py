@@ -9,6 +9,7 @@ from jaqsi.noise import KrausChannel
 from jaqsi.tape import recording, pulse_recording
 from jaqsi.drawing import draw_text, draw_mpl, draw_tikz
 from jaqsi.unitary import UnitaryGates
+from jaqsi.evolution import Evolution
 from jaqsi import simulation, memory
 
 
@@ -531,6 +532,9 @@ class Script:
         # It is a global toggle that changes the compiled circuit, so it has to
         # take part in every cache key.
         gate_error = UnitaryGates.batch_gate_error
+        # Solver defaults (integrator, host offload, ...) are read while the
+        # circuit is traced, so they change the compiled program too.
+        solver_defaults = make_hashable(Evolution._solver_defaults)
 
         # Non-array kwargs (e.g. ``noise_params``, ``pulse``) change the
         # recorded circuit and are captured in the traced closure, so they have
@@ -549,6 +553,7 @@ class Script:
                 arg_shapes,
                 cache_kwargs,
                 gate_error,
+                solver_defaults,
                 has_init,
                 fingerprint,
             )
@@ -617,6 +622,7 @@ class Script:
             arg_shapes,
             cache_kwargs,
             gate_error,
+            solver_defaults,
             has_init,
             fingerprint,
         )
