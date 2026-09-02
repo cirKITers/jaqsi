@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np  # needed to prevent jitting some operations
 
+from jaqsi.evolution import resolve_pending
 from jaqsi.operations import (
     Operation,
     _einsum_subscript,
@@ -198,6 +199,9 @@ def simulate_and_measure(
     Returns:
         Measurement result (shape depends on *type*).
     """
+    # Solve all pulse-level gates of the tape in batches before simulating.
+    resolve_pending(tape)
+
     if use_density:
         # Check if any operation is actually a noise channel.
         has_noise = any(isinstance(o, KrausChannel) for o in tape)

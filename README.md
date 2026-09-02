@@ -22,6 +22,15 @@ pip install jaqsi
 
 to install our package from [PyPI](https://pypi.org/project/jaqsi/).
 
+For NVIDIA GPUs install the CUDA extra
+
+```
+pip install "jaqsi[cuda13]" # or cuda12 depending on your hardware
+```
+
+JAX then runs on the GPU by default; set `JAX_PLATFORMS=cpu` to force the CPU.
+Note that pulse-level simulation is supported but not necessarily ideal on GPU; see the [pulses docs](docs/pulses.md) for details.
+
 ```python
 import jaqsi
 
@@ -58,9 +67,10 @@ flowchart LR
 
     jaqsi.script --> jaqsi.simulation([Simulation])
     jaqsi.script --> jaqsi.memory([Memory])
+    jaqsi.script --> jaqsi.evolution([Evolution])
     jaqsi.script --> jaqsi.drawing([Drawing])
 
-    jaqsi.pulse --> jaqsi.evolution([Evolution])
+    jaqsi.pulse --> jaqsi.evolution
     jaqsi.pulse --> jaqsi.envelope([PulseEnvelope])
     jaqsi.pulse --> jaqsi.pparams([PulseParams])
 
@@ -68,6 +78,7 @@ flowchart LR
     jaqsi.unitary --> jaqsi.noise([Noise])
     jaqsi.simulation --> jaqsi.gateset
     jaqsi.simulation --> jaqsi.noise
+    jaqsi.simulation --> jaqsi.evolution
     jaqsi.paulis --> jaqsi.gateset
     jaqsi.evolution --> jaqsi.ops([Operations])
     jaqsi.math --> jaqsi.ops
