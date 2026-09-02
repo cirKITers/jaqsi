@@ -1,54 +1,11 @@
-## Ansaetze
-
-```python
-from qml_essentials.ansaetze import Ansaetze
-```
-
-::: qml_essentials.ansaetze.Ansaetze
-    options:
-      heading_level: 3
-
-### Circuit
-
-```python
-from qml_essentials.ansaetze import Circuit
-```
-
-::: qml_essentials.ansaetze.Circuit
-    options:
-      heading_level: 4
-
-### Declarative Circuit
-
-```python
-from qml_essentials.ansaetze import DeclarativeCircuit
-```
-
-::: qml_essentials.ansaetze.DeclarativeCircuit
-    options:
-      heading_level: 4
-
-### Block
-
-```python
-from qml_essentials.ansaetze import Block
-```
-
-::: qml_essentials.ansaetze.Block
-    options:
-      heading_level: 4
-
-### Encoding
-
-```python
-from qml_essentials.ansaetze import Encoding
-```
-
-::: qml_essentials.ansaetze.Encoding
-    options:
-      heading_level: 4
-
 ## Gates
+
+`Gates` is **the entry point for applying gates to a circuit**.
+It records the gate on the active tape, attaches any requested noise, and routes the call to
+either `UnitaryGates` or `PulseGates` depending on the `pulse` keyword.
+The two backends below, and the matrix-level classes in `jaqsi.gateset`, are what `Gates`
+dispatches to; call them directly only when you need the operation object itself (for
+observables, `.dagger()` / `.power()`, or matrix algebra).
 
 As the structure of the different classes used to realize pulse and unitary gates can be a bit confusing, the following diagram might help:
 
@@ -56,317 +13,251 @@ As the structure of the different classes used to realize pulse and unitary gate
 ![Gate Structure](figures/pulses_structure_dark.png#center#only-dark)
 
 ```python
-from qml_essentials.gates import Gates
+from jaqsi import Gates
 ```
 
-::: qml_essentials.gates.Gates
+::: jaqsi.gates.Gates
     options:
       heading_level: 3
 
 ### Unitary Gates
 
 ```python
-from qml_essentials.gates import UnitaryGates
+from jaqsi.gates import UnitaryGates
 ```
 
-::: qml_essentials.gates.UnitaryGates
+::: jaqsi.gates.UnitaryGates
     options:
       heading_level: 4
 
 ### Pulse Gates
 
 ```python
-from qml_essentials.gates import PulseGates
+from jaqsi.gates import PulseGates
 ```
 
-::: qml_essentials.gates.PulseGates
+::: jaqsi.gates.PulseGates
     options:
       heading_level: 4
 
 ### Pulse Structure
 
 ```python
-from qml_essentials.gates import PulseParams
+from jaqsi.gates import PulseParams
 ```
 
-::: qml_essentials.gates.PulseParams
+::: jaqsi.gates.PulseParams
     options:
       heading_level: 4
 
 ### Pulse Envelope
 
 ```python
-from qml_essentials.gates import PulseEnvelope
+from jaqsi.gates import PulseEnvelope
 ```
 
-::: qml_essentials.gates.PulseEnvelope
+::: jaqsi.gates.PulseEnvelope
     options:
       heading_level: 4
 
 ### Pulse Information
 
 ```python
-from qml_essentials.gates import PulseInformation
+from jaqsi.gates import PulseInformation
 ```
 
-::: qml_essentials.gates.PulseInformation
+::: jaqsi.gates.PulseInformation
     options:
       heading_level: 4
-
-## Model
-
-```python
-from qml_essentials.model import Model
-```
-
-::: qml_essentials.model.Model
-    options:
-      heading_level: 3
-
-## Entanglement
-
-```python
-from qml_essentials.entanglement import Entanglement
-```
-
-::: qml_essentials.entanglement.Entanglement
-    options:
-      heading_level: 3
-
-## Expressibility
-
-```python
-from qml_essentials.expressibility import Expressibility
-```
-
-::: qml_essentials.expressibility.Expressibility
-    options:
-      heading_level: 3
-
-## Coefficients
-
-```python
-from qml_essentials.coefficients import Coefficients
-```
-
-::: qml_essentials.coefficients.Coefficients
-    options:
-      heading_level: 3
-
-### Fourier Tree
-
-```python
-from qml_essentials.coefficients import FourierTree
-```
-
-::: qml_essentials.coefficients.FourierTree
-    options:
-      heading_level: 4
-
-### Fourier Coefficient Correlation
-
-```python
-from qml_essentials.coefficients import FCC
-```
-
-::: qml_essentials.coefficients.FCC
-    options:
-      heading_level: 4
-
-### Datasets
-
-```python
-from qml_essentials.coefficients import Datasets
-```
-
-::: qml_essentials.coefficients.Datasets
-    options:
-      heading_level: 4
-
-## Topologies
-
-```python
-from qml_essentials.topologies import Topology
-```
-
-::: qml_essentials.topologies.Topology
-    options:
-      heading_level: 3
-
 ## Operations
 
 ```python
-from qml_essentials.operations import Operation
+from jaqsi.operations import Operation
 ```
 
-::: qml_essentials.operations.Operation
+::: jaqsi.operations.Operation
     options:
       heading_level: 3
 
 ### Hermitian
 
 ```python
-from qml_essentials.operations import Hermitian
+from jaqsi.operations import Hermitian
 ```
 
-::: qml_essentials.operations.Hermitian
-    options:
-      heading_level: 4
-
-### Kraus Channel
-
-```python
-from qml_essentials.operations import KrausChannel
-```
-
-::: qml_essentials.operations.KrausChannel
+::: jaqsi.operations.Hermitian
     options:
       heading_level: 4
 
 ### Parametrized Hamiltonian
 
 ```python
-from qml_essentials.operations import ParametrizedHamiltonian
+from jaqsi.operations import ParametrizedHamiltonian
 ```
 
-::: qml_essentials.operations.ParametrizedHamiltonian
+::: jaqsi.operations.ParametrizedHamiltonian
     options:
       heading_level: 4
 
 ### Pauli Rotation
 
 ```python
-from qml_essentials.operations import PauliRot
+from jaqsi.gateset import PauliRot
 ```
 
-::: qml_essentials.operations.PauliRot
+::: jaqsi.gateset.PauliRot
     options:
       heading_level: 4
 
-### Pauli Word
+
+## Paulis
 
 ```python
-from qml_essentials.operations import PauliWord
+from jaqsi.paulis import PauliWord, pauli_decompose, state_expectation
 ```
 
-::: qml_essentials.operations.PauliWord
+::: jaqsi.paulis.PauliWord
     options:
-      heading_level: 4
+      heading_level: 3
 
-## Pauli Circuit
+::: jaqsi.paulis.pauli_decompose
+    options:
+      heading_level: 3
+
+::: jaqsi.paulis.state_expectation
+    options:
+      heading_level: 3
+
+## Noise
 
 ```python
-from qml_essentials.pauli import PauliCircuit
+from jaqsi.noise import KrausChannel, BitFlip, DepolarizingChannel, ThermalRelaxationError
 ```
 
-::: qml_essentials.pauli.PauliCircuit
+::: jaqsi.noise.KrausChannel
+    options:
+      heading_level: 3
+
+::: jaqsi.noise.QubitChannel
     options:
       heading_level: 3
 
 ## Math
 
 ```python
-from qml_essentials.math import quantum_fisher_information, fubini_study_metric, fidelity, trace_distance, phase_difference
+from jaqsi.math import quantum_fisher_information, fubini_study_metric, fidelity, trace_distance, phase_difference, partial_trace, marginalize_probs, logm_v
 ```
 
-::: qml_essentials.math.quantum_fisher_information
+::: jaqsi.math.quantum_fisher_information
     options:
       heading_level: 3
 
-::: qml_essentials.math.fubini_study_metric
+::: jaqsi.math.fubini_study_metric
     options:
       heading_level: 3
 
-::: qml_essentials.math.fidelity
+::: jaqsi.math.fidelity
     options:
       heading_level: 3
 
-::: qml_essentials.math.trace_distance
+::: jaqsi.math.trace_distance
     options:
       heading_level: 3
 
-::: qml_essentials.math.phase_difference
+::: jaqsi.math.phase_difference
+    options:
+      heading_level: 3
+
+::: jaqsi.math.partial_trace
+    options:
+      heading_level: 3
+
+::: jaqsi.math.marginalize_probs
+    options:
+      heading_level: 3
+
+::: jaqsi.math.logm_v
     options:
       heading_level: 3
 
 ## Quantum Optimal Control
 
 ```python
-from qml_essentials.qoc import QOC
+from jaqsi.qoc import QOC
 ```
 
-::: qml_essentials.qoc.QOC
+::: jaqsi.qoc.QOC
     options:
       heading_level: 3
 
 ### Cost Functions
 
 ```python
-from qml_essentials.qoc import Cost
+from jaqsi.qoc import Cost
 ```
 
-::: qml_essentials.qoc.Cost
+::: jaqsi.qoc.Cost
     options:
       heading_level: 4
 
 ### Cost Function Registry
 
 ```python
-from qml_essentials.qoc import CostFnRegistry
+from jaqsi.qoc import CostFnRegistry
 ```
 
-::: qml_essentials.qoc.CostFnRegistry
+::: jaqsi.qoc.CostFnRegistry
     options:
       heading_level: 4
 
 ### Evolution Engine
 
 ```python
-from qml_essentials.jaqsi import Evolution
+from jaqsi import Evolution
 ```
 
-::: qml_essentials.evolution.Evolution
+::: jaqsi.evolution.Evolution
     options:
       heading_level: 4
 
 ## Script
 
 ```python
-from qml_essentials.script import Script
+from jaqsi.script import Script
 ```
 
-::: qml_essentials.script.Script
+::: jaqsi.script.Script
     options:
       heading_level: 3
 
 ## Drawing
 
 ```python
-from qml_essentials.drawing import TikzFigure
+from jaqsi.drawing import TikzFigure
 ```
 
-::: qml_essentials.drawing.TikzFigure
+::: jaqsi.drawing.TikzFigure
     options:
       heading_level: 3
 
 ```python
-from qml_essentials.drawing import PulseEvent
+from jaqsi.drawing import PulseEvent
 ```
 
-::: qml_essentials.drawing.PulseEvent
+::: jaqsi.drawing.PulseEvent
     options:
       heading_level: 3
 
 ## Tape
 
 ```python
-from qml_essentials.tape import recording, pulse_recording
+from jaqsi.tape import recording, pulse_recording
 ```
 
-::: qml_essentials.tape.recording
+::: jaqsi.tape.recording
     options:
       heading_level: 3
 
-::: qml_essentials.tape.pulse_recording
+::: jaqsi.tape.pulse_recording
     options:
       heading_level: 3

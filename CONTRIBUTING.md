@@ -1,4 +1,4 @@
-# Contributing to QML-Essentials
+# Contributing to JAQSI
 
 Contributions are highly welcome! :hugging_face:
 
@@ -32,11 +32,11 @@ We do our testing with Pytest.
 There are Github action pipelines in place, that will do linting and testing once you open a pull request.
 However, it's a good idea to run tests and linting (Ruff and Ty) locally before pushing, e.g.
 ```
-uv run ruff format qml_essentials tests
-uv run ruff check --fix qml_essentials tests
-uv run pytest --dist load -m "not expensive" -n auto
+uv run ruff format jaqsi tests
+uv run ruff check --fix jaqsi tests
+uv run pytest --dist load -m "not benchmark" -n auto
 ```
-Which will run all tests that are not marked as expensive.
+Which will run all tests that are not marked as benchmarks.
 See [Pytest](https://pytest.org/) for more details on how to run specific tests only.
 
 ## Packaging
@@ -56,7 +56,7 @@ We use Zensical for our documentation. To run a server locally, run:
 uv run zensical serve
 ```
 This will automatically trigger a rebuild each time you make changes.
-See the [Zensical Documentation](https://cirkiters.github.io/qml-essentials/usage/) for more details.
+See the [Zensical Documentation](https://zensical.org/) for more details.
 
 Publishing (and building) the documentation is done automagically using Github actions.
 Note that we're building with `--strict` mode enabled, meaning that any warnings that you might see will be treated as errors.

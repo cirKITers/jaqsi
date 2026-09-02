@@ -3,7 +3,7 @@
 A collection of model-agnostic math tools, operating on density matrices or states directly.
 
 ```python
-from qml_essentials.math import quantum_fisher_information, fubini_study_metric, fidelity, trace_distance, phase_difference
+from jaqsi.math import quantum_fisher_information, fubini_study_metric, fidelity, trace_distance, phase_difference
 ```
 
 ## Quantum Fisher Information
@@ -21,44 +21,32 @@ For a mixed state $\rho(\theta) = \sum_k p_k \ket{k}\bra{k}$ the QFI is given th
 \[F_{ij} = 2 \sum_{k, l\,:\,p_k + p_l > 0} \frac{\mathrm{Re}\left(\braket{k | \partial_i\rho | l}\braket{l | \partial_j\rho | k}\right)}{p_k + p_l}\]
 
 Both cases are handled by the same function, which dispatches on the kind of state returned by the provided callable.
-Set the model's `execution_type` to `"state"` to obtain the pure-state QFI, or to `"density"` (e.g. for noisy circuits) to obtain the mixed-state QFI:
-
-```python
-from qml_essentials.model import Model
-from qml_essentials.math import quantum_fisher_information
-
-model = Model(n_qubits=2, n_layers=1, circuit_type="Hardware_Efficient")
-model.execution_type = "state"
-
-qfi = quantum_fisher_information(lambda p: model(params=p), model.params)
-```
-
-The result is a real, symmetric $(P, P)$ matrix, where $P$ is the total number of parameters (the parameter axes are flattened).
-The state returned by the callable is assumed to be normalised, which the underlying simulator guarantees.
-
-Note that `model.params` is passed in its native (batched) shape; the callable closes over any
-data `inputs`, e.g. `lambda p: model(params=p, inputs=x)`.
-
-The callable does not have to come from a `Model`; any function mapping parameters to a state
-vector works, including a circuit built directly with the JAQSI `Script`:
+Execute with `type="state"` to obtain the pure-state QFI, or with `type="density"` (e.g. for noisy circuits) to obtain the mixed-state QFI:
 
 ```python
 import jax.numpy as jnp
-from qml_essentials.script import Script
-from qml_essentials.operations import RX, RY, CX
-from qml_essentials.math import quantum_fisher_information, fubini_study_metric
+from jaqsi.script import Script
+from jaqsi import Gates
+from jaqsi.math import quantum_fisher_information, fubini_study_metric
 
 def state_fn(theta):
     def circuit(t):
-        RX(t[0], wires=0)
-        RY(t[1], wires=1)
-        CX(wires=[0, 1])
+        Gates.RX(t[0], wires=0)
+        Gates.RY(t[1], wires=1)
+        Gates.CX(wires=[0, 1])
     return Script(circuit, n_qubits=2).execute(type="state", args=(theta,))
 
 theta = jnp.array([0.7, 1.3])
 qfi = quantum_fisher_information(state_fn, theta)
 metric = fubini_study_metric(state_fn, theta)
 ```
+
+The result is a real, symmetric $(P, P)$ matrix, where $P$ is the total number of parameters (the parameter axes are flattened).
+The state returned by the callable is assumed to be normalised, which the simulator guarantees.
+
+Any function mapping parameters to a state vector works, so a higher-level model wrapping a
+`Script` can be passed just as well, closing over any data inputs
+(e.g. `lambda p: model(params=p, inputs=x)`).
 
 ## Fubini-Study Metric
 
@@ -71,12 +59,12 @@ four, $F_{ij} = 4\,g_{ij}$:
 
 `fubini_study_metric(state_fn, params)` follows the same calling convention as
 `quantum_fisher_information` but, since the metric is only defined for pure states, requires
-`state_fn` to return a state vector (`execution_type = "state"`):
+`state_fn` to return a state vector (`type="state"`):
 
 ```python
-from qml_essentials.math import fubini_study_metric
+from jaqsi.math import fubini_study_metric
 
-g = fubini_study_metric(lambda p: model(params=p), model.params)
+g = fubini_study_metric(state_fn, theta)
 ```
 
 ## Fidelity

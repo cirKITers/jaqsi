@@ -1,387 +1,314 @@
 # Usage
 
-Central component of our package is the Fourier model which you can import with 
+This page aims to provide a brief overview of JAQSI (just another quantum simulator).
+
+Circuits are built by calling gates inside a plain Python function and are executed through the `Script` class.
+Frameworks layered on top of JAQSI (such as [qml-essentials](https://github.com/cirKITers/qml-essentials), which builds quantum Fourier models on it) usually abstract the simulator away entirely, but building custom circuits with more granular control is a first-class use case.
+
+In the figure below, you can see how JAQSI provides the foundation for the more standard interfaces `Model`, `Ansaetze` and `Gates`.
+The circuit-constructing layers interface with the `Operations` module of JAQSI, while `Model` interfaces with the `Script` class, the main interface for circuit execution.
+
+Generally, all operations are registered on a `Tape` when being created in the context of a `Script` (see examples below).
+All gate matrix definitions are registered in the `Gateset` module, the Kraus channels for noisy simulation in `Noise`, and the shared `Operation` machinery in `Operations`.
+
+![overview](figures/jaqsi_overview_light.png#center#only-light)
+![overview](figures/jaqsi_overview_dark.png#center#only-dark)
+
+While the standard gate execution is quite straight-forward, the pulse simulation requires a bit more care.
+Here we split up `PulseGates` (abstracted by the `Gates` class) into `PulseParams` and `PulseEnvelope` to get more fine grained control over the underlying implementation.
+As a single source of truth for both, there is the `PulseInformation` class, providing valid combination of these two characteristics.
+
+![overview](figures/jaqsi_pulse_light.png#center#only-light)
+![overview](figures/jaqsi_pulse_dark.png#center#only-dark)
+
+## Architecture
+
+Internally, the simulator is split into a handful of modules, each with a single responsibility.
+Together they form a pipeline that turns a circuit function into a measurement result.
+
+- `operations.py` : the foundation. Defines the `Operation` base class that every gate, observable and noise channel derives from, together with the (parametrized) Hamiltonians used for pulse evolution. Each `Operation` carries its matrix definition and knows how to apply itself to a statevector or density matrix via cached `einsum` contractions.
+- `gates.py` : **the entry point for applying gates.** `Gates.<Name>(...)` records a gate on the tape, attaches any requested noise, and routes the call to `UnitaryGates` or `PulseGates` depending on the `pulse` flag. Write circuits against this and they run at either level unchanged.
+- `unitary.py` : the ideal-unitary backend. Builds the `gateset` operation for each gate and attaches the requested noise channels; also home to the `GateError` angle noise and the `batch_gate_error` flag.
+- `pulses.py` : the pulse-level backend. Implements the fundamental gates (RX, RY, RZ, CZ) as time-dependent drives and composes the rest from them, with `PulseParams`, `PulseEnvelope` and the global `PulseInformation` calibration state.
+- `gateset.py` : the gate library. Every concrete gate (`H`, `RX`, `CX`, `Rot`, `PauliRot`, ...) and observable (`PauliZ`, ...) as an `Operation` subclass, so instantiating one inside a circuit function records it on the active tape.
+- `paulis.py` : the symbolic Pauli/Clifford layer. A stabilizer-tableau `PauliWord` with O(n) Clifford conjugation plus the matrix-based decomposition helpers it replaces. Symbolic bookkeeping in integer NumPy rather than numeric simulation; it backs Pauli-Clifford circuit transforms and Fourier-tree algorithms built on top of JAQSI.
+- `noise.py` : the Kraus noise channels (`BitFlip`, `DepolarizingChannel`, `AmplitudeDamping`, `ThermalRelaxationError`, ...), layered on `Operation`. Recording any of them on a tape is what switches the simulation from statevector to density matrix.
+- `tape.py` : the recording layer. Holds the thread-local `Tape` onto which operations register themselves as they are created. A `recording()` context manager collects the operations built inside a circuit function into an ordered list : nothing is executed yet.
+- `script.py` : the orchestrator. The `Script` class is **the entry point for executing a circuit** (and what `Model` builds upon), the counterpart to `Gates` for building one. It records the circuit, infers the number of qubits, decides between pure and density-matrix simulation, dispatches measurements, and takes care of JIT caching, automatic batching (`vmap` with memory-aware chunking) and circuit drawing.
+- `simulation.py` : the compute engine. A set of pure, stateless functions that run a recorded tape: `simulate_pure` (statevector), `simulate_mixed` (density matrix) and the measurement kernels (`measure_state`, `measure_density`, `sample_shots`). Being pure JAX functions, they are fully differentiable and `jit`/`vmap`-compatible.
+- `memory.py` : memory accounting. Pure helpers that estimate the peak memory of a batched run and, when it would not fit in available RAM, split the batch into chunks that do (`estimate_peak_bytes`, `compute_chunk_size`, `execute_chunked`). `Script` calls these to drive its memory-aware `vmap` chunking.
+- `drawing.py` : rendering. Turns a recorded tape into a text, matplotlib or TikZ circuit diagram, and pulse events into a pulse-schedule plot.
+- `evolution.py` : Hamiltonian time-evolution. The `Evolution` class builds gates that evolve a (parametrized) Hamiltonian in time, either analytically (`exp(-i t H)` for a static `H`) or by solving the Schrödinger equation with an adaptive `diffrax` solver or a fixed-step Magnus integrator. This module backs the pulse-level simulation.
+- `__init__.py` : the package entry point. Re-exports `Script` for circuit building, `Gates` for applying them, the `Hamiltonian` factory for time-evolution sources, and the quantum-info helpers, so that `import jaqsi` is enough for everyday use. Time evolution is invoked as a method on the Hamiltonian object (`hamiltonian.evolve(...)`); the `Evolution` engine is re-exported for solver configuration (`Evolution.set_solver_defaults`).
+- `math.py` : model-agnostic quantum-info utilities on states and density matrices : `fidelity`, `trace_distance`, `phase_difference`, `logm_v`, the quantum Fisher information and Fubini-Study metric, plus the pulse/gate-independent post-processing helpers `partial_trace` and `marginalize_probs`.
+- `qoc.py` : quantum optimal control. Optimises pulse parameters against a target unitary with a configurable cost-function registry, and ships the tuned results as `qoc_results_<envelope>.csv` package data.
+
+A call to `Script.execute(...)` then runs four stages:
+
+1. Record : the circuit function is executed once so that each operation registers itself on a fresh `Tape`.
+2. Prepare : the qubit count is inferred and the presence of noise channels decides between statevector and density-matrix simulation.
+3. Simulate : the operations are applied in order, each gate contracted into the state via `einsum`.
+4. Measure : the resulting state is turned into the requested output (`state`, `probs`, `expval` or `density`) and optionally sampled into shots.
+
+As the whole pipeline is built on JAX, any execution can be differentiated, JIT-compiled and vectorized.
+
+## Usage
+
+The API of our simulator is very similar to what one might be used to know from pennylane.
+
+### Gate Level
+
+**`Gates` is the entry point for applying gates.**
+Calling `Gates.<Name>(...)` inside a circuit function records the gate on the active tape,
+attaches any requested noise, and routes the call to the unitary or the pulse backend.
+Write circuits against `Gates` and the same circuit runs at either level; see
+[pulse level](#pulse-level) below.
+
+For a basic circuit execution, we have to do two imports:
+
 ```python
-from qml_essentials.model import Model
+import jaqsi as js
+from jaqsi import Gates
 ```
 
-In the simplest scenario, one would instantiate such a model with $4$ qubits and a single layer using the "Hardware Efficient" ansatz by:
+Next, we can create a circuit and specify the observable:
+
 ```python
-model = Model(
-    n_qubits=4,
-    n_layers=1,
-    circuit_type="Hardware_Efficient",
-)
+def circuit():
+    Gates.H(wires=0)
+    Gates.CX(wires=[0, 1])
+
+obs = [js.PauliZ(wires=0), js.PauliZ(wires=1)]
 ```
 
-You can take a look at your model, by simply calling
+Observables are the one place you reach past `Gates`: an observable is an object you hand to
+`execute`, not a gate you apply, so it comes straight from the package root (equivalently
+`jaqsi.gateset`).
+
+Finally, creating a `Script` and excute it will give us the probabilities for this standard Bell-Circuit:
+
 ```python
-model.draw(figure="mpl")
+jss = js.Script(circuit)
+jss.execute(type="probs", obs=obs)
 ```
 
-![Hardware Efficient Ansatz](figures/circuits_4q/Hardware_Efficient_light.png#center#only-light)
-![Hardware Efficient Ansatz](figures/circuits_4q/Hardware_Efficient_dark.png#center#only-dark)
-
-Looks good to you? :eyes: Head over to the [*Training*](training.md) page for **getting started** with an easy example, where we also show how to implement **trainable frequencies** :rocket:
-If you want to learn more about, why we get the above results, checkout the [*Data-Reuploading*](#data-reuploading) section.
-
-Note that calling the model without any (`None`) values for the `params` and `inputs` argument, will implicitly call the model with the recently (or initial) parameters and `0`s as input.
-I.e. simply running the following
-```python
-model()
-```
-will return the combined expectation value of a n-local measurement (`observables=None` is default, measuring all qubits). 
-
-In the following we will describe some concepts of the `Model` class.
-For a more detailled reference on the methods and arguments that are available, please see the [references page](https://cirkiters.github.io/qml-essentials/references/#model).
-
-## The essentials
-
-There is much more to this package than just providing a Fourier model.
-You can calculate the [Expressibility](expressibility.md) or [Entangling Capability](entanglement.md) besides the [Coefficients](coefficients.md) which are unique to this kind of QML interpretation.
-You can also provide a custom circuit, by instantiating from the `Circuit` class in `qml_essentials.ansaetze.Circuit`.
-See page [*Ansaetze*](ansaetze.md) for more details and a list of available Ansatzes that we provide with this package.
-
-## Data-Reuploading
-
-The idea of repeating the input encoding is one of the core features of our framework and builds upon the work by [*Schuld et al. (2020)*](https://doi.org/10.48550/arXiv.2008.08605).
-Essentially, it allows us to represent a quantum circuit as a truncated Fourier series, which is a powerful feature that enables the model to mimic arbitrary non-linear functions.
-The number of frequencies that the model can represent is constrained by the number of data encoding steps within the circuit.
-
-Typically, there is a reuploading step after each layer and on each qubit (`data_reupload=True`).
-However, our package also allows you to specify an array with the number of rows representing the qubits and number of columns representing the layers.
-Then, a `True` means that encoding is applied at the corresponding position within the circuit.
-
-In the following example, we disable two instances of the data-reuploading step, thus leaving the model with `model.degree = (5)` frequencies (2 negative + zero frequency + 2 positive).
+Parameterization of circuits is straightforward; you just have to pass the args to the `execute` function:
 
 ```python
-model = Model(
-    n_qubits=2,
-    n_layers=2,
-    circuit_type="Hardware_Efficient",
-    data_reupload=[[True, False], [False, True]],
-)
-```
-
-Checkout the [*Coefficients*](coefficients.md) page for more details on how you can visualize such a model using tools from signal analysis.
-If you want to encode multi-dimensional data (check out the [*Encoding*](usage.md#encoding) section on how to do that), you can specify another dimension in the `data_reupload` argument (which just extents naturally).
-```python
-model = Model(
-    n_qubits=2,
-    n_layers=2,
-    circuit_type="Hardware_Efficient",
-    data_reupload=[[[0, 1], [1, 1]], [[1, 1], [0, 1]]],
-)
-```
-Now, the first input will have two frequencies (`sum([0,1,1,0]) = 2`), and the second input will have four frequencies (`sum([1,1,1,1]) = 4`).
-Of course, this is just a rule of thumb and can vary depending on the exact encoding strategy.
-
-## Parameter Initialization
-
-The initialization strategy can be set when instantiating the model with the `initialization` argument.
-
-The default strategy is "random" which will result in random initialization of the parameters using the domain specified in the `initialization_domain` argument.
-Other options are:
-
- - `"zeros"`: All parameters are initialized to $0$
- - `"zero-controlled"`: All parameters are initialized to randomly except for the angles of the controlled rotations which are initialized to $0$
- - `"pi-controlled"`: All parameters are initialized to randomly except for the angles of the controlled rotations which are initialized to $\\pi$
- - `"pi"`: All parameters are initialized to $\\pi$
-
-The `initialize_params` method provides the option to re-initialise the parameters after model instantiation using either the previous configuration or a different strategy.
-Given a PRNG key, it returns the `key` from `key, subkey = random.split(key)`  as documented [here](https://docs.jax.dev/en/latest/random-numbers.html) and uses the subkey for the actual parameter initialization.
-It's also possible to omit the `key` argument entirely, as the model has an internal `random_key` state which is updated every time randomness is utilized.
-This allows to repeatingly call `model.initialize_params()` to generate a continous sequence of random initializations.
-The same key state can be advanced manually with `model.next_key()`, which is required to obtain fresh randomness inside a JAX transformation (see [Noise](noise.md#randomness-under-jax-transformations)).
-
-
-## Encoding
-
-The encoding can be set when instantiating the model with the `encoding` argument.
-
-The default encoding is "RX" which will result in a single RX rotation per qubit.
-Other options are:
-
-- A string such as `"RX"` that will result in a single RX rotation per qubit
-- A list of strings such as `["RX", "RY"]` that will result in a sequential RX and RY rotation per qubit
-- Any callable such as `Gates.RX`
-- A list of callables such as `[Gates.RX, Gates.RY]`
-- An instance of the `Encoding` class
-
-See page [*Ansaetze*](ansaetze.md) for more details regarding the `Gates` class.
-If a list of encodings is provided, the input is assumed to be multi-dimensional.
-Otherwise multiple inputs are treated as batches of inputs.
-Encoding gates are always part of the circuit, also when the input is zero and the gates reduce to the identity.
-
-In case of a multi-dimensional input, you can obtain the highest frequency in each encoding dimension from the `model.degree` property.
-Note that, `model.degree` includes the negative and zero frequency (i.e. the full spectrum).
-Individual frequencies can be obtained via `model.frequencies`.
-
-By default, all encodings are `Hamming` encodings, meaning, all encodings are applied equally in each data-reuploading step.
-Note it is also possible to provide a custom encoding as the `encoding` argument essentially accepts any callable or list of callables see [here](ansaetze.md#custom_encoding) for more details.
-To make things a little bit easier, we implement following encoding strategies as introduced in [Generalization despite overfitting in quantum machine learning models](https://doi.org/10.22331/q-2023-12-20-1210) with their respective spectral properties:
-
-| Encoding strategy | Spectrum $\Omega$                                                                                                  | $\vert\Omega\vert$ |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------ |
-| Hamming           | $\{-n_{q},-(n_{q}-1),\ldots,n_{q}\}$                                                                               | $2 n_{q}+1$        |
-| Binary            | $\{-2^{n_{q}}+1,\ldots,2^{n_{q}}-1\}$                                                                              | $2^{n_{q}+1}- 1$   |
-| Ternary           | $\left\{-\left\lfloor\frac{3^{n_{q}}}{2}\right\rfloor,\ldots,\left\lfloor\frac{3^{n_{q}}}{2}\right\rfloor\right\}$ | $3^{n_{q}}$        |
-| Golomb            | $\{m_{i}-m_{j} : m_{i}, m_{j} \in G\}$ for a Golomb ruler $G$ with $2^{n_{q}}$ marks                              | $2^{n_{q}}(2^{n_{q}}-1)+1$ |
-
-Unlike the per-qubit strategies above, the Golomb strategy encodes the input on a multi-qubit diagonal Hamiltonian whose eigenvalues form a Golomb ruler, so that all pairwise differences (the resulting frequencies) are distinct.
-This yields the maximum number of distinct frequencies with minimal degeneracy for a given number of qubits.
-
-You can use these templates by instantiating an `Encoding` class with the encoding strategy you like and passing it to the model upon initialization:
-
-```python
-from qml_essentials.ansaetze import Encoding
-
-model = Model(
-    n_qubits=2,
-    n_layers=1,
-    circuit_type="Circuit_19",
-    encoding=Encoding("ternary", ["RX", "RY"]),
-)
-
-model.frequencies
-```
-
-Returns `[9,9]`, which corresponds to the ternary spectrum $3^{2}$ for two indpendent inputs.
-
-
-## State Preparation
-
-While the encoding is applied in each data-reuploading step, the state preparation is only applied at the beginning of the circuit, but after the `StatePreparation` noise (see [below](#noise) for details).
-The default is no state preparation. Similar to the encoding, you can provide the `state_preparation` argument as
-
-- A string such as `"H"` that will result in a single Hadamard per qubit
-- A list of strings such as `["H", "H"]` that will result in two consecutive Hadamards per qubit
-- Any callable such as `Gates.H`
-- A list of callables such as `[Gates.H, Gates.H]`
-
-See page [*Ansaetze*](ansaetze.md) for more details regarding the `Gates` class.
-
-## Output Shape
-
-The output shape is determined by the `observables` argument, provided in the instantiation of the model.
-When set to `None` all qubits are measured which will result in the shape being of size $n$ by default (depending on the execution type, see below).
-Setting `observables` to an integer will measure the qubit with the index specified.
-Furthermore, "parity measurements" are supported, where `observables` becomes a list of qubit groups, e.g. `[[0, 1], [2, 3]]` to measure the parity between qubits 0 and 1 and qubits 2 and 3.
-Alternatively, `observables` accepts a list of `Operation` objects, in which case the `expval` execution type returns one expectation value per observable.
-The `output_qubit` argument is a deprecated alias for `observables`.
-
-If `force_mean` flag is set when calling the model, the output is averaged to a single value (while keeping the batch/ input dimension).
-This is usually helpful, if you want to perform a n-local measurement over all qubits where only the average over $n$ expecation values is of interest.
-
-## Execution Type
-
-Our model be simulated in different ways by setting the `execution_type` property, when calling the model, to:
-
-- `expval`: Returns the expectation value between $0$ and $1$
-- `density`: Calculates the density matrix
-- `probs`: Simulates the model with the number of shots, set by `model.shots`
-
-For all three different execution types, the output shape is determined by the `observables` argument, provided in the instantiation of the model.
-In case of `density` the partial density matrix is returned.
-
-## Noise
-
-Noise can be added to the model by providing a `noise_params` argument, when calling the model, which is a dictionary with following keys
-
-- `BitFlip`
-- `PhaseFlip`
-- `AmplitudeDamping`
-- `PhaseDamping`
-- `Depolarizing`
-- `MultiQubitDepolarizing`
-- `StatePreparation`
-- `Measurement`
-
-with values between $0$ and $1$.
-Additionally, a `GateError` can be applied, which controls the variance of a Gaussian distribution with zero mean applied on the input vector.
-Each gate draws its error independently.
-
-While `BitFlip`, `PhaseFlip`, `Depolarizing` and `GateError`s are applied on each gate, `AmplitudeDamping`, `PhaseDamping`, `StatePreparation` and `Measurement` are applied on the whole circuit.
-
-Furthermore, `ThermalRelaxation` can be applied. 
-Instead of the probability, the entry for this type of error consists of another dict with the keys:
-
-- `t1`: The relative T1 relaxation time (a typical value might be $180\mathrm{us}$)
-- `t2`: The relative T2 relaxation time (a typical value might be $100\mathrm{us}$)
-- `t_factor`: The relative gate time factor (a typical value might be $0.018\mathrm{us}$)
-
-The units can be ignored as we are only interested in relative times, above values might belong to some superconducting system.
-Note that `t2` is required to be max. $2\times$`t1`.
-Based on `t_factor` and the circuit depth the execution time is estimated, and therefore the influence of thermal relaxation over time.
-
-## Pulse Level Simulation
-
-Our framework extends beyond unitary-level simulation by integrating **pulse-level simulation**.
-This allows you to move from the abstract unitary layer, where gates are treated as instantaneous idealized operations, down to the physical pulse layer, where gates are represented by time-dependent microwave control fields.  
-
-In the pulse representation, each gate is decomposed into Gaussian-shaped pulses parameterized by:
-
-- $A$: amplitude of the pulse
-- $\sigma$: width (standard deviation) of the Gaussian envelope
-- $t$: pulse duration
-
-By default, the framework provides optimized pulse parameters based on typical superconducting qubit frequencies ($\omega_q = 10\pi$, $\omega_c = 10\pi$).  
-The Gaussian envelope is the default; other shapes can be selected via the `pulse_shape` argument on model instantiation (see [*Pulses*](pulses.md#pulse_envelopes_and_solver) for the available envelopes).
-
-Switching between unitary-level and pulse-level execution is seamless and controlled by which pulse parameters you pass:
-
-```python
-# Default unitary-level simulation
-model(params, inputs)
-
-# Ansatz and state-preparation gates at pulse level
-model(params, inputs, pulse_params=model.pulse_params)
-
-# Only the input-encoding gates at pulse level
-model(params, inputs, enc_pulse_params=model.enc_pulse_params)
-
-# Everything at pulse level
-model(params, inputs, pulse_params=model.pulse_params, enc_pulse_params=model.enc_pulse_params)
-```
-
-The two parameter groups let you choose which group of gates is lowered to the pulse layer.
-`pulse_params` lowers the ansatz and state-preparation gates, `enc_pulse_params` lowers the input-encoding gates, and omitting both keeps every gate ideal.
-See [*Pulses*](pulses.md#pulse_level_encoding) for the parameters belonging to each group.
-
-Pulse-level gates can also be instantiated directly:
-
-```python
-from qml_essentials.gates import Gates
-
-# RX gate represented by its microwave pulse
-Gates.RX(w, wires=0, gate_mode="pulse")
-
-# With custom pulse parameters [A, sigma, t]
-pulse_params = [0.5, 0.2, 1.0]
-Gates.RX(w, wires=0, pulse_params=pulse_params, gate_mode="pulse")
-```
-and then used in [custom Ansaetze](ansaetze.md#custom_ansatz) or directly as [encoding gates](ansaetze.md#custom_encoding).
-See our documentation on [Quantum Optimal Control (QOC)](pulses.md#quantum_optimal_control_qoc) for more details on how to choose pulse parameters.
-
-For more details:
-
-- See [*Ansaetze*](pulses.md) for a deeper explanation of our pulse-level gates and ansaetze, as well as details on Quantum Optimal Control (QOC), which enables optimizing pulses directly for target unitaries.  
-- See [*Training*](training.md#pulse_level) for how to train pulse parameters jointly with rotation angles.  
-
-
-## Batching and Multithreading (using JAX)
-
-In our framework, JAX automatically handles the number and distribution of the workers depending on the batch sizes and available CPUs.
-Batching works for inputs, parameters and pulse parameters.
-If all three, inputs, parameters and pulse parameters, are provided, with sizes `B_I`, `B_P` and `B_R`, respectively, the effective batch dimension will multiply, i.e. resulting in `B_I * B_P * B_R` combinations.
-Internally, these combinations will be flattened during processing and then reshaped to the original shape afterwards, such that the output shape is `[B_I, B_P, B_R, O]`.
-Here, `O` is the general output shape depending on the execution type.
-This shape is also available as a property of the model: `model.batch_shape`.
-Note, that the output shape is squeezed by default, i.e. every axis of dimension 1 is suppressed.
-This includes the output axis `O`, so a single observable or a batch of one changes the rank of the result.
-Pass `keepdims=True` to get the full `[B_I, B_P, B_R, O]` shape instead:
-
-```python
-model(params, inputs, keepdims=True)
-```
-
-In addition to letting the model handle repeating the batch axes, it is also possible to disable this functionality by setting `repeat_batch_axis` upon model initialization.
-This parameter is an array of boolean values determining of the corresponding axis in the `batch_shape` (#Inputs, #Params, #PulseParams) should be repeated.
-Of course, when providing the batch manually, the dimensions have to match.
-
-```python
-model = Model(
-    n_qubits=2,
-    n_layers=1,
-    circuit_type="Circuit_19",
-    repeat_batch_axis=[False, True, True],
-    ,
-)
-
-key = jax.random.key(1000)
-key = model.initialize_params(key, repeat=10)
-model(inputs=random.uniform(key, (10, 1)))
-```
-In this example, instead of a batch size of `100`, the output will have a batch size of `10` instead (shape `(10,2)`).
-
-Calls with a batch dimension reuse a compiled execution plan whenever the shapes of the arguments match.
-Changes to the circuit structure, such as `data_reupload` or `observables`, are accounted for, but replacing the `encoding` after instantiation is not supported.
-
-## Functional Execution
-
-Calling the model directly stores the arguments it receives on the model, which is convenient but means that such a call cannot be wrapped in an outer `jax.jit` or `jax.vmap`: the stashed tracer would escape the transform and invalidate the next call.
-
-For that purpose, the model provides `apply`, which is a pure counterpart of the regular call.
-It writes no model state, and the output always keeps the full `[B_I, B_P, B_R, B_E, O]` shape, so its rank does not depend on the batch sizes.
-
-```python
-import jax
-
-def cost(params):
-    y_hat = model.apply(params=params, inputs=inputs, force_mean=True)
-    return jnp.mean((y_hat.reshape(-1) - targets) ** 2)
-
-# the whole training step can be jitted
-loss, grads = jax.jit(jax.value_and_grad(cost))(model.params)
-```
-
-Arguments left as `None` fall back to the current model state, which an outer `jax.jit` bakes in at trace time.
-Anything that varies between calls, such as the parameters during training or the key for shots, has to be passed explicitly.
-In contrast to the regular call, `apply` takes no `data_reupload` argument, as that reconfigures the circuit; set `model.data_reupload` beforehand instead.
-Randomness is controlled through the `key` argument, which defaults to the model's random key without advancing it.
-The regular call accepts the equivalent `random_key` argument; in both cases a fresh key per step comes from `model.next_key()`, see [Noise](noise.md#randomness-under-jax-transformations).
-
-## Quantikz Export
-
-In addition to the printing the model to console and into a figure using matplotlib (thanks to Pennylane); our framework extends this functionality by allowing you to create nice [Quantikz](https://doi.org/10.48550/arXiv.1809.03842) figures that you can embedd in a Latex document :heart_eyes:.
-This can be achieved by 
-
-```python
-fig = model.draw(figure="tikz", gate_values=False)
-fig.export("tikz_circuit.tex", full_document=True)
-```
-
-![Tikz Circuit](figures/circuit_tikz_light.png#center#only-light)
-![Tikz Circuit](figures/circuit_tikz_dark.png#center#only-dark)
-
-If you want to see the actual gate values instead of variables, simply set `gate_values=True` which is also the default option.
-The returned `fig` variable is a `TikzFigure` object that stores the Latex string and allows exporting to a specified file.
-To create a document that can be compiled, simply pass `full_document=True` when calling `export`.
-
-## Using a arbitrary circuit
-
-In some cases you may not want to utilize the structure enforced by the `Model` class.
-Therefore, this section provides an example on how to use a custom circuit.
-
-```python
-from qml_essentials.gates import Gates as g
-from qml_essentials.model import Model
-import qml_essentials.jaqsi as js
 import jax.numpy as jnp
 
-def my_circuit(params, inputs, *args, **kwargs) -> None:
-    params = params.squeeze() # because the input shape can be a bit tricky otherwise
+n_qubits = 1
 
-    g.H(wires=[0])
-    g.H(wires=[1])
-    g.RX(1 * inputs, wires=[0])
-    g.PauliRot(params[0], wires=[0, 1])
-    g.CRX(3 * inputs, wires=[0, 1])
+def circuit(phi, theta, omega):
+    Gates.Rot(phi, theta, omega, wires=0)
+    Gates.Rot(jnp.pi, 1/2*jnp.pi, 1/4*jnp.pi, wires=0)
 
-
-params = jnp.array([[jnp.pi / 2, 1]])
-
-model = Model(
-    n_qubits=2,
-    n_layers=1,
-    observables=0,  # this will correspond to PauliZ on qubit 0
-)
-
-# Define the spectrum (usually this is inferred from the encoding)
-model.degree = (7,)  # we count a full spectrum (-3,-2,...,2,3)
-model.frequencies = (-3, -1, 0, 1, 3)  # here we define the actual frequencies
-# We need to define which shape the parameters have
-model._params_shape = (2, 1)  # (n_layers, n_params_per_layer)
-# Overwrite the script with our own variational circuit
-model.script = js.Script(f=my_circuit)
+obs = [js.PauliZ(wires=i) for i in range(n_qubits)]
+jss = js.Script(circuit)
+jss.execute(type="expval", obs=obs, args=(jnp.pi, 1/2*jnp.pi, 1/4*jnp.pi))
 ```
+
+Training those circuits is a breeze as we entirely build upon JAX and can just use OPTAX for this purpose:
+
+```python
+import optax as otx
+
+def cost_fct(params):
+    phi, theta, omega = params
+    return jss.execute(type="expval", obs=[js.PauliZ(0)], args=(phi, theta, omega))[0]
+
+params = jax.numpy.array([0.1, 0.2, 0.3])
+opt = otx.adam(0.01)
+opt_state = opt.init(params)
+
+for epoch in range(1, 101):
+    grads = jax.grad(cost_fct)(params)
+    updates, opt_state = opt.update(grads, opt_state, params)
+    params = otx.apply_updates(params, updates)
+
+    if epoch % 10 == 0:
+        print(f"Epoch: {epoch}, Cost: {cost_fct(params):.4f}")
+```
+
+See the [training](training.md) page for the JIT-compiled version of this loop, fitting
+data with batched inputs, and optimising pulse parameters.
+
+`Gates.<Name>(...)` records the gate and returns nothing.  When you need the operation
+*object* itself — to call `.dagger()` or `.power()` on it, to build a composite observable,
+or to do matrix algebra — take the class from `jaqsi.gateset` instead:
+
+```python
+from jaqsi.gateset import RX, PauliX
+
+def circuit():
+        RX(0.5, wires=0)
+        RX(0.5, wires=0).dagger()
+        PauliX(wires=0).power(2)
+
+obs = [js.PauliZ(0)]
+jss = js.Script(circuit)
+res = jss.execute(type="expval", obs=obs)
+
+print(res) # we expect to end up in |0⟩ again
+```
+
+Noise is normally requested per gate through `Gates`, which emits the matching channels
+for you (see [noise](noise.md)):
+
+```python
+noise_params = {"Depolarizing": 0.1}
+
+def circuit():
+    Gates.H(wires=0, noise_params=noise_params)
+    Gates.CX(wires=[0, 1], noise_params=noise_params)
+
+jss = js.Script(circuit)
+rho = jss.execute(type="density")
+purity = jnp.real(jnp.trace(rho @ rho))
+print(purity) # Purity should be < 1 
+```
+
+Channels are operations too, so they can also be placed by hand from `jaqsi.noise` when you
+want control over exactly where they land.
+
+By default the simulation starts from the all-zero state $\lvert 0\dots0\rangle$.
+To start from an arbitrary statevector instead, pass it via the `initial_state`
+argument of `execute`:
+
+```python
+def circuit():
+    Gates.RX(0.3, wires=0)
+
+jss = js.Script(circuit)
+plus = jnp.array([1.0, 1.0], dtype=complex) / jnp.sqrt(2.0)  # |+⟩
+res = jss.execute(type="expval", obs=[js.PauliZ(0)], initial_state=plus)
+```
+
+Without `in_axes` the state must be a single statevector of shape `(2**n,)`. 
+When batching with `in_axes`, `initial_state` may be a single 1D state broadcast across the batch, or a 2D array of shape `(B, 2**n)` that provides one state per sample.
+
+### Pulse Level
+
+This section focusses on the pulse-level interface of the simulator.
+For pulse gate mechanics, envelopes and quantum optimal control, head over to the [pulses](pulses.md) documentation.
+
+Pulse-level simulation goes through the same entry point: pass `pulse=True` to any gate and
+`Gates` routes it to the pulse backend instead of the ideal unitary.
+Nothing else about the circuit changes.
+
+```python
+def circuit(w):
+    Gates.RX(w, wires=0, pulse=True)
+
+obs = [js.PauliZ(0)]
+jss = js.Script(circuit)
+res = jss.execute(type="expval", obs=obs, args=(jnp.pi*0.5,))
+print(res) # expect sth. around 0 (but not too close)
+```
+
+Because the flag is per call, a circuit can mix both levels — here the entangling gate stays
+ideal while the rotations are lowered to pulses:
+
+```python
+def circuit(w):
+    Gates.RX(w, wires=0, pulse=True)
+    Gates.RY(w, wires=0, pulse=True)
+    Gates.CX(wires=[0, 1])
+```
+
+Mixing pulse level simulation with noisy simulations is possible as well:
+
+```python
+noise_params = {"Depolarizing": 0.1}
+
+def circuit(w):
+    Gates.RX(w, wires=0, pulse=True, noise_params=noise_params)
+    Gates.RY(w, wires=0, pulse=True, noise_params=noise_params)
+    Gates.CX(wires=[0, 1], noise_params=noise_params)
+
+jss = js.Script(circuit)
+rho = jss.execute(type="density", args=(jnp.pi*0.5,))
+purity = jnp.real(jnp.trace(rho @ rho))
+print(purity) # Purity should be < 1 
+```
+
+You can visualize the pulses schedules, i.e. the sequence in which the pulses are applied on each qubit in the circuit, using the `draw` method.
+Here, shaded areas represent the pulse shape/envelope (e.g. "Gaussian") of the pulse and the vertical line represents the time at which the pulse is applied.
+Note that all gates are automatically decomposed into basis gates (e.g. `H` is decomposed into `RZ` and `RY`).
+
+```python
+def circuit(w):
+    Gates.RX(w, wires=0, pulse=True)
+    Gates.CZ(wires=0, pulse=True)
+    Gates.H(wires=1, pulse=True)
+    Gates.H(wires=1, pulse=True)
+
+jss = js.Script(circuit)
+
+fig, axes = jss.draw(figure="pulse", args=(jnp.pi*0.5,))
+```
+
+![pulse-schedule](figures/pulse_schedule_light.png#center#only-light)
+![pulse-schedule](figures/pulse_schedule_dark.png#center#only-dark)
+
+Now let's get a level deeper into the pulse interface.
+Under the hood what happens when you run a pulse gate, is that you evolve a Hermitian matrix in time.
+To demonstrate this, we build a very simple circuit:
+
+```python
+def evol_circuit(t):
+    time_evol = js.Hermitian(matrix=js.PauliZ._matrix, wires=0).evolve()
+    time_evol(t=t, wires=0)
+```
+
+We can use this circuit directly in JAQSI by passing it to the `Script` class we've seen above:
+
+```python
+jss = js.Script(f=evol_circuit)
+res = jss.execute(type="expval", obs=[js.PauliX(0)], args=(0.3,))
+```
+
+Here, we let the circuit evolve for `t=0.3` and measure the qubit in the `X` basis.
+Obviously this isn't particluarly usefull, because it doesn't change the state of the qubit.
+However, we can extend this circuit a little bit to start in the `|+⟩` state instead:
+
+```python
+def evol_circuit(t):
+    Gates.H(wires=0)  # prepare |+⟩
+    time_evol = js.Hermitian(matrix=js.PauliZ._matrix, wires=0).evolve()
+    time_evol(t=t, wires=0)
+```
+
+Note, how we combine a "standard" gate here and combine it with a Hermitian evolution.
+We can then measure:
+
+```python
+t = 0.3
+jss = js.Script(f=evol_circuit)
+res = jss.execute(type="expval", obs=[js.PauliX(0)], args=(t,))
+```
+
+which gives us exactly `jnp.cos(2 * t)`.
+
+We've just seen an example for a static Hermitian evolution.
+Naturally we can extend this to a parameterized Hermitian as well:
+
+```python
+def coeff(p, t):
+    return p
+
+def circuit(p,t):
+    Gates.H(wires=0)  # prepare |+⟩
+    ph = coeff * Hermitian(matrix=Z, wires=0, record=False)
+    ph.evolve()([p], t)
+```
+
+Note here, that `coeff` is a callable.
+While it seems a little bit strange to first use a callable and the parameterize it directly afterwards, this mechanism allows us to pre-compile the operation.
+
+```python
+jss = js.Script(f=circuit)
+res = jss.execute(type="expval", obs=[PauliX(0)], args=(p,))
+```
+
+Naturally, we can now use this parameter in a training-scenario and leverage the performance advantage we got through the pre-compilation.

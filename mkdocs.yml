@@ -1,17 +1,11 @@
-site_name: QML Essentials
-site_url: https://cirkiters.github.io/qml-essentials/
+site_name: JAQSI
+site_url: https://cirkiters.github.io/jaqsi/
 nav:
   - index.md
   - usage.md
-  - ansaetze.md
-  - coefficients.md
-  - entanglement.md
-  - expressibility.md
   - training.md
-  - jaqsi.md
   - pulses.md
   - noise.md
-  - random_sampling.md
   - math_utils.md
   - references.md
 theme:
@@ -80,7 +74,7 @@ extra:
       link: https://www.kit.edu/datenschutz.php
       name: Datenschutz
     - icon: fontawesome/brands/github
-      link: https://github.com/cirKITers/qml-essentials
+      link: https://github.com/cirKITers/jaqsi
       name: CirKITers @ Github
 
 extra_javascript:

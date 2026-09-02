@@ -1,11 +1,12 @@
 import pytest
 import jax
 import jax.numpy as jnp
+import numpy as np
 import itertools
 
-from qml_essentials import jaqsi as js
-from qml_essentials.pulses import PulseInformation
-from qml_essentials.qoc import (
+import jaqsi as js
+from jaqsi.pulses import PulseInformation
+from jaqsi.qoc import (
     Cost,
     CostFnRegistry,
     QOC,
@@ -386,3 +387,33 @@ class TestFidelity:
         assert jnp.isclose(phase_diff, 0.0, atol=1e-2), (
             f"Phase off for w={w}: {phase_diff}"
         )
+
+
+cphase_pulse_testdata = [0.0, np.pi / 4, np.pi / 2, np.pi]
+
+
+@pytest.mark.unittest
+@pytest.mark.parametrize("w", cphase_pulse_testdata)
+def test_cphase_pulse_gate(w):
+    """Validate CPhase pulse decomposition against the unitary gate.
+
+    Note: The pulse decomposition of CPhase introduces a global phase
+    of exp(i*w/4) relative to the exact diagonal unitary. Since global
+    phase is physically unobservable, we only check fidelity here.
+    """
+    gate = "CPhase"
+    qoc = QOC(**default_qoc_params)
+    pulse_circuit, target_circuit = qoc.create_CPhase()
+    pulse_script = js.Script(pulse_circuit, n_qubits=2)
+    target_script = js.Script(target_circuit, n_qubits=2)
+
+    state_pulse = pulse_script.execute(
+        type="state", args=(w, PulseInformation.gate_by_name(gate).params)
+    )
+    state_target = target_script.execute(type="state", args=(w,))
+
+    fidelity = jnp.abs(jnp.vdot(state_target, state_pulse)) ** 2
+    assert fidelity <= 1.0 + 1e-6, f"Fidelity of {gate} can't be larger 1 for w={w}"
+    assert np.isclose(fidelity, 1.0, atol=1e-2), (
+        f"Fidelity too low for w={w}: {fidelity}"
+    )

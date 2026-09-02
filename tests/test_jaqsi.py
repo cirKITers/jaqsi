@@ -7,15 +7,20 @@ import numpy as np
 import time
 
 
-from qml_essentials.jaqsi import (
+from jaqsi import (
     Script,
     Evolution,
     partial_trace,
     marginalize_probs,
     build_parity_observable,
 )
-from qml_essentials.operations import (
+from jaqsi.operations import (
     Operation,
+    Hermitian,
+    ParametrizedHamiltonian,
+    # noise channels
+)
+from jaqsi.gateset import (
     H,
     CX,
     CCX,
@@ -32,10 +37,11 @@ from qml_essentials.operations import (
     PauliY,
     PauliZ,
     Id,
-    Hermitian,
-    ParametrizedHamiltonian,
+)
+from jaqsi.paulis import (
     prod,
-    # noise channels
+)
+from jaqsi.noise import (
     BitFlip,
     PhaseFlip,
     DepolarizingChannel,
@@ -43,12 +49,12 @@ from qml_essentials.operations import (
     PhaseDamping,
     ThermalRelaxationError,
 )
-from qml_essentials.gates import (
+from jaqsi.gates import (
     PulseEnvelope,
     PulseInformation,
     PulseGates,
 )
-from qml_essentials import memory
+from jaqsi import memory
 
 import logging
 
@@ -239,7 +245,7 @@ class TestEvolve:
     @pytest.mark.unittest
     def test_evolve_parametrized_on_tape(self) -> None:
         """The EvolvedOp from time-dependent evolve is recorded on the tape."""
-        from qml_essentials.tape import recording
+        from jaqsi.tape import recording
 
         def coeff(p, t):
             return 1.0
@@ -259,7 +265,7 @@ class TestEvolve:
         the Hermitian used for construction must NOT appear on the tape —
         only the EvolvedOp should.
         """
-        from qml_essentials.tape import recording
+        from jaqsi.tape import recording
 
         def coeff(p, t):
             return 1.0
@@ -285,7 +291,7 @@ class TestEvolve:
     def test_evolve_max_steps_throws_by_default(self) -> None:
         """A tight ``max_steps`` budget on a fast-oscillating Hamiltonian
         triggers a solver error (default ``throw=True``)."""
-        from qml_essentials.jaqsi import Evolution
+        from jaqsi import Evolution
 
         # Highly oscillatory coefficient — Tsit5 will need many steps
         def fast_coeff(p, t):
@@ -305,7 +311,7 @@ class TestEvolve:
     def test_evolve_throw_false_returns_nan_on_failure(self) -> None:
         """With ``throw=False`` and an unreachable budget, a failed solve
         returns a NaN-filled unitary instead of raising."""
-        from qml_essentials.jaqsi import Evolution
+        from jaqsi import Evolution
 
         def fast_coeff(p, t):
             return p[0] * jnp.cos(1.0e3 * t)
@@ -329,7 +335,7 @@ class TestEvolve:
         """``throw=False`` does not affect well-behaved problems: the
         returned unitary is finite and equals the static-evolve result
         for a constant coefficient."""
-        from qml_essentials.jaqsi import Evolution
+        from jaqsi import Evolution
 
         def const_coeff(p, t):
             return 1.0
@@ -1003,7 +1009,7 @@ def test_parity_observable_two_qubit() -> None:
 @pytest.mark.unittest
 def test_parity_observable_not_on_tape() -> None:
     """build_parity_observable must not add operations to the tape."""
-    from qml_essentials.tape import recording
+    from jaqsi.tape import recording
 
     with recording() as tape:
         _ = build_parity_observable([0, 1])
@@ -1018,7 +1024,7 @@ def test_parity_observable_not_on_tape() -> None:
 )
 def test_hermitian_record_on_tape(record, expected_len) -> None:
     """Hermitian(record=...) should appear on the tape only when record=True."""
-    from qml_essentials.tape import recording
+    from jaqsi.tape import recording
 
     with recording() as tape:
         if record:
@@ -1457,7 +1463,7 @@ class TestGateOperations:
     @pytest.mark.unittest
     def test_mul_updates_tape(self):
         """Scalar multiplication inside a circuit replaces the op on the tape."""
-        from qml_essentials.tape import recording
+        from jaqsi.tape import recording
 
         with recording() as tape:
             PauliX(wires=0) * 0.5
@@ -1655,8 +1661,8 @@ class TestDrawing:
     def test_draw_mpl_gate_values(self):
         """gate_values=False labels gates by name, without angles."""
         import matplotlib.pyplot as plt
-        from qml_essentials.drawing import draw_mpl
-        from qml_essentials.tape import recording
+        from jaqsi.drawing import draw_mpl
+        from jaqsi.tape import recording
 
         with recording() as tape:
             RX(jnp.pi / 2, wires=0)
@@ -1818,7 +1824,7 @@ class TestChunk:
         _ = script.execute(type="density", args=(small_thetas,), in_axes=(0,))
 
         # Retrieve the cached batched function
-        from qml_essentials.gates import UnitaryGates
+        from jaqsi.gates import UnitaryGates
 
         arg_shapes = tuple(
             (a.shape, a.dtype) if hasattr(a, "shape") else type(a)
@@ -1991,7 +1997,7 @@ class TestChunk:
         script2 = Script(circuit_fn, n_qubits=n_qubits)
         _ = script2.execute(**exec_kwargs)
 
-        from qml_essentials.gates import UnitaryGates
+        from jaqsi.gates import UnitaryGates
 
         arg_shapes = tuple(
             (a.shape, a.dtype) if hasattr(a, "shape") else type(a) for a in (thetas,)
@@ -2038,7 +2044,7 @@ class TestChunk:
         script2 = Script(circuit, n_qubits=1)
         _ = script2.execute(type="probs", args=(thetas,), in_axes=(0,))
 
-        from qml_essentials.gates import UnitaryGates
+        from jaqsi.gates import UnitaryGates
 
         arg_shapes = tuple(
             (a.shape, a.dtype) if hasattr(a, "shape") else type(a) for a in (thetas,)
@@ -2067,7 +2073,7 @@ class TestPulse:
     @pytest.mark.unittest
     def test_collect_pulse_events_rx(self):
         """collect_pulse_events for RX returns a single physical pulse event."""
-        from qml_essentials.drawing import collect_pulse_events
+        from jaqsi.drawing import collect_pulse_events
 
         original = PulseInformation.get_envelope()
         try:
@@ -2086,7 +2092,7 @@ class TestPulse:
     @pytest.mark.unittest
     def test_collect_pulse_events_rz(self):
         """collect_pulse_events for RZ returns a virtual-Z event (no envelope_fn)."""
-        from qml_essentials.drawing import collect_pulse_events
+        from jaqsi.drawing import collect_pulse_events
 
         events = collect_pulse_events("RZ", jnp.pi / 3, wires=1)
         assert len(events) == 1
@@ -2107,7 +2113,7 @@ class TestPulse:
         self, gate_name, params, wires, expected_gates, parent
     ):
         """Composite gates decompose into expected leaf pulse events."""
-        from qml_essentials.drawing import collect_pulse_events
+        from jaqsi.drawing import collect_pulse_events
 
         events = collect_pulse_events(gate_name, params, wires=wires)
         gate_names = [ev.gate for ev in events]
@@ -2119,7 +2125,7 @@ class TestPulse:
     @pytest.mark.unittest
     def test_collect_pulse_events_invalid_gate(self):
         """Unknown gate name raises ValueError."""
-        from qml_essentials.drawing import collect_pulse_events
+        from jaqsi.drawing import collect_pulse_events
 
         with pytest.raises(ValueError, match="Unknown pulse gate"):
             collect_pulse_events("INVALID", 0.0, wires=0)
@@ -2127,7 +2133,7 @@ class TestPulse:
     @pytest.mark.unittest
     def test_draw_pulse_schedule_returns_figure(self):
         """draw_pulse_schedule returns a matplotlib (fig, axes) tuple."""
-        from qml_essentials.drawing import collect_pulse_events, draw_pulse_schedule
+        from jaqsi.drawing import collect_pulse_events, draw_pulse_schedule
 
         original = PulseInformation.get_envelope()
         try:
@@ -2146,7 +2152,7 @@ class TestPulse:
     @pytest.mark.unittest
     def test_draw_pulse_schedule_multi_qubit(self):
         """Pulse schedule with CX renders subplots for both qubits."""
-        from qml_essentials.drawing import collect_pulse_events, draw_pulse_schedule
+        from jaqsi.drawing import collect_pulse_events, draw_pulse_schedule
 
         original = PulseInformation.get_envelope()
         try:
@@ -2164,7 +2170,7 @@ class TestPulse:
     @pytest.mark.unittest
     def test_draw_pulse_schedule_show_carrier(self):
         """show_carrier=True should not raise."""
-        from qml_essentials.drawing import collect_pulse_events, draw_pulse_schedule
+        from jaqsi.drawing import collect_pulse_events, draw_pulse_schedule
 
         original = PulseInformation.get_envelope()
         try:
@@ -2182,7 +2188,7 @@ class TestPulse:
     @pytest.mark.parametrize("envelope", PulseEnvelope.available())
     def test_draw_pulse_schedule_all_envelopes(self, envelope):
         """Pulse schedule renders without error for every envelope."""
-        from qml_essentials.drawing import collect_pulse_events, draw_pulse_schedule
+        from jaqsi.drawing import collect_pulse_events, draw_pulse_schedule
 
         if envelope == "general":
             return
@@ -2366,7 +2372,7 @@ class TestPulse:
                 PulseGates.RX(w, wires=0, pulse_params=pp)
 
             def target_circuit(w):
-                from qml_essentials.operations import RX as OpRX
+                from jaqsi.gateset import RX as OpRX
 
                 OpRX(w, wires=0)
 
@@ -2405,7 +2411,7 @@ class TestPulse:
                 PulseGates.RZ(w, wires=0, pulse_params=pp)
 
             def target_circuit(w):
-                from qml_essentials.operations import RZ as OpRZ
+                from jaqsi.gateset import RZ as OpRZ
 
                 OpRZ(w, wires=0)
 
@@ -2560,7 +2566,7 @@ class TestPulse:
                 PulseGates.RX(w, wires=0, pulse_params=pp)
 
             def target_circuit(theta):
-                from qml_essentials.operations import RX as OpRX
+                from jaqsi.gateset import RX as OpRX
 
                 OpRX(theta, wires=0)
 
@@ -2587,14 +2593,14 @@ class TestPulse:
     @pytest.mark.unittest
     def test_solver_default_dopri8(self):
         """Default solver is dopri8 (adaptive RK)."""
-        from qml_essentials.jaqsi import Evolution
+        from jaqsi import Evolution
 
         assert Evolution._solver_defaults["solver"] == "dopri8"
 
     @pytest.mark.unittest
     def test_solver_invalid_name_raises(self):
         """Unknown solver names raise ValueError."""
-        from qml_essentials.jaqsi import Evolution
+        from jaqsi import Evolution
 
         with pytest.raises(ValueError):
             Evolution.set_solver_defaults(solver="foobar")
@@ -2602,8 +2608,8 @@ class TestPulse:
     @pytest.mark.unittest
     def test_magnus_matches_dopri8_rx(self):
         """magnus2 / magnus4 reproduce dopri8 unitaries to high accuracy."""
-        from qml_essentials.jaqsi import Evolution
-        import qml_essentials.operations as op_mod
+        from jaqsi import Evolution
+        import jaqsi.operations as op_mod
 
         original_env = PulseInformation.get_envelope()
         try:
@@ -2639,8 +2645,8 @@ class TestPulse:
     @pytest.mark.unittest
     def test_magnus4_fourth_order_convergence(self):
         """magnus4 error scales as h^4 (≈16× drop per N doubling)."""
-        from qml_essentials.jaqsi import Evolution
-        import qml_essentials.operations as op_mod
+        from jaqsi import Evolution
+        import jaqsi.operations as op_mod
 
         original_rwa = PulseInformation.get_rwa()
         original_frame = PulseInformation.get_frame()
@@ -2688,7 +2694,7 @@ class TestPulse:
     @pytest.mark.unittest
     def test_drive_frame_invalid_raises(self):
         """Unknown frame names raise ValueError."""
-        from qml_essentials.pulses import PulseEnvelope
+        from jaqsi.pulses import PulseEnvelope
 
         with pytest.raises(ValueError):
             PulseEnvelope.build_coeff_fns(PulseEnvelope.drag, 1.0, 1.0, frame="foobar")
@@ -2698,7 +2704,7 @@ class TestPulse:
     @pytest.mark.unittest
     def test_drive_frame_equivalent_to_lab(self):
         """drive-frame coefficients equal lab-frame to machine precision."""
-        from qml_essentials.pulses import PulseEnvelope
+        from jaqsi.pulses import PulseEnvelope
 
         for omega_c, omega_q in [(1.234, 1.234), (1.5, 1.0), (3.0, 7.0)]:
             lab = PulseEnvelope.build_coeff_fns(
@@ -2792,7 +2798,7 @@ class TestPulse:
     @pytest.mark.unittest
     def test_pulse_recording_context_direct(self):
         """pulse_recording context manager works without Script."""
-        from qml_essentials.tape import pulse_recording, recording
+        from jaqsi.tape import pulse_recording, recording
 
         original = PulseInformation.get_envelope()
         try:
@@ -2810,7 +2816,7 @@ class TestPulse:
     @pytest.mark.unittest
     def test_pulse_recording_no_events_outside_context(self):
         """No events captured when pulse_recording is not active."""
-        from qml_essentials.tape import active_pulse_tape, recording
+        from jaqsi.tape import active_pulse_tape, recording
 
         original = PulseInformation.get_envelope()
         try:

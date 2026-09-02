@@ -11,22 +11,26 @@ The dependency graph is shown in the following figure:
 In this graph, the edge weights represent the number child gates required to implement a particular gate.
 The gates at the bottom represent the fundamental gates.
 
-Generally, the gates are available through the same interface as the regular unitary gates.
-Pulse simulation can easily be enabled by adding the `gate_mode="pulse"` keyword argument, e.g.:
+Pulse gates are reached through the same entry point as every other gate, `Gates`.
+Pulse simulation is enabled per call by adding the `pulse=True` keyword argument, e.g.:
 
 ```python
-from qml_essentials.gates import Gates
+from jaqsi import Gates
 
-Gates.CY(wires=[0, 1], gate_mode="pulse")
+Gates.CY(wires=[0, 1], pulse=True)
 ```
+
+Because the flag lives on the call, the same circuit function can run at either level, and a
+circuit can mix the two.  Calling `PulseGates` directly bypasses the noise handling and
+pulse-parameter management that `Gates` performs, so prefer the flag.
 
 ## Pulse Parameters per Gate
 
-You can use the `PulseInformation` class in `qml_essentials.gates` to access both the number and optimized values of the pulse parameters for each gate.
+You can use the `PulseInformation` class in `jaqsi.gates` to access both the number and optimized values of the pulse parameters for each gate.
 Consider the following code snippet:
 
 ```python
-from qml_essentials.gates import PulseInformation as pinfo
+from jaqsi.gates import PulseInformation as pinfo
 
 gate = "CX"
 
@@ -52,7 +56,7 @@ However, it is also possible to overwrite these behavior, as we will see in the 
 
 ## Calling Gates in Pulse Mode
 
-To execute a gate in pulse mode, provide `gate_mode="pulse"` when calling the gate.  
+To execute a gate in pulse mode, provide `pulse=True` when calling it on `Gates`.  
 Optional `pulse_params` can be passed; if omitted, optimized default values are used:
 
 ```python
@@ -60,83 +64,30 @@ w = 3.14159
 
 # CX gate with default optimized pulse parameters 
 # (gates of equal type will recieve equal pulse parameters)
-Gates.CX(w, wires=0, gate_mode="pulse")
+Gates.CX(w, wires=0, pulse=True)
 
 # CX gate with custom pulse parameters (overwriting default pulse parameters)
 pulse_params = [0.5, 7.9218643, 22.0381298, 1.09409231, 0.31830953, 0.5, 7.9218643, 22.0381298, 1.09409231]
-Gates.RX(w, wires=0, gate_mode="pulse", pulse_params=pulse_params)
+Gates.RX(w, wires=0, pulse=True, pulse_params=pulse_params)
 ```
-
-## Building Ansatzes in Pulse Mode
-
-When building an ansatz in pulse mode (via a `Model`), the framework internally passes an array of ones as element-wise scalers for the optimized parameters.  
-If `pulse_params` are provided for a model or gate, these are treated similarly as element-wise scalers to modify the default pulses. We again take advantage of the **kwargs and call:
-
-```python
-model(pulse_params=model.pulse_params * 1.5)
-```
-
-Here, input and params are inferred from the `Model` instance, and we scale all pulse parameters by a factor of 1.5.
-Currently there is no way to change the raw values of pulse parameter through the model api directly.
-
-Note that a `Model` selects the pulse level differently than an individual gate does.
-A gate takes `gate_mode`, which is either `"unitary"` or `"pulse"`, whereas a model infers this per gate group from the pulse parameters you pass: `pulse_params` lowers the ansatz and state-preparation gates, `enc_pulse_params` lowers the input-encoding gates.
-Passing neither keeps the whole circuit unitary.
-The `gate_mode` argument of a model call is deprecated and only kept for backwards compatibility.
-
-Similar to the input and standard parameters, we also support batching for the `pulse_params` argument, meaning that you can also pass a batched array of pulse parameters of e.g. size 2 to as follows:
-
-```python
-model(pulse_params=np.repeat(model.pulse_params, 2, axis=0))
-``` 
-
-## Pulse-Level Encoding
-
-Passing `pulse_params` runs the ansatz and state-preparation gates at pulse level while the input-encoding gates are still applied as ideal unitaries.
-The encoding gates are covered by `enc_pulse_params`: passing only those runs the encoding at pulse level and keeps the ansatz unitary, passing both runs everything at pulse level.
-Pass only `enc_pulse_params` if you want to study the encoding in isolation, without the ansatz pulses contributing to the result.
-The scalers behave identically to the pulse parameters of trainable unitaries.
-
-```python
-model = Model(n_qubits=2, n_layers=1, circuit_type="Hardware_Efficient")
-
-# only the encoding gates run as pulses, the ansatz stays unitary
-model(inputs=inputs, enc_pulse_params=model.enc_pulse_params)
-
-# encoding and ansatz gates run as pulses
-model(inputs=inputs, pulse_params=model.pulse_params, enc_pulse_params=model.enc_pulse_params)
-
-# scale the encoding pulses explicitly
-model(inputs=inputs, enc_pulse_params=model.enc_pulse_params * 1.5)
-```
-
-`enc_pulse_params` is batchable along its leading axis, analogous to `pulse_params`:
-
-```python
-model(inputs=inputs, enc_pulse_params=np.repeat(model.enc_pulse_params, 2, axis=0))
-```
-
-Each parameter set only lowers the gates it belongs to, so the group whose parameters you omit stays unitary.
-
-Note that Golomb encoding and custom encoding callables have no pulse level representation, so passing `enc_pulse_params` raises a `ValueError` for them.
 
 ## Pulse Envelopes and Solver
 
 Each pulse is shaped by an envelope. The available envelopes can be queried with `PulseEnvelope.available()`:
 
 ```python
-from qml_essentials.gates import PulseEnvelope
+from jaqsi.gates import PulseEnvelope
 
 print(PulseEnvelope.available())
 # ['gaussian', 'square', 'cosine', 'drag', 'sech', 'general']
 ```
 
-The default is `gaussian`. The envelope is selected globally via the `pulse_shape` argument of the `Model`, e.g. `Model(..., pulse_shape="drag")`.
+The default is `gaussian`. The envelope is a process-global setting, switched with `PulseInformation.set_envelope("drag")`.
 
 Under the hood, pulse gates are simulated by integrating their time-dependent Hamiltonian. The ODE solver can be configured via `Evolution.set_solver_defaults`, where `solver` is one of `"dopri8"` (default), `"dopri5"`, `"magnus2"` or `"magnus4"`:
 
 ```python
-from qml_essentials.jaqsi import Evolution
+from jaqsi import Evolution
 
 Evolution.set_solver_defaults(solver="magnus4", magnus_steps=128)
 ```
@@ -154,7 +105,7 @@ Those usually take a paramter `w`, allowing to sweep through the parameter space
 Using the standard parameter specification, we can initialize the QOC class:
 
 ```python
-from qml_essentials.qoc import QOC, default_qoc_params
+from jaqsi.qoc import QOC, default_qoc_params
 
 qoc = QOC(**default_qoc_params)
 ```
@@ -167,7 +118,7 @@ qoc.optimize_all(sel_gates=["RX", "RY", "RZ", "CZ"])
 ```
 
 which will run the optimization for the specified gate.
-The output of the optimization is logged to `qoc_logs.csv` whereas the resulting pulse parameters are stored in `qoc_results.csv`.
+The output of the optimization is logged to `qoc_logs.csv` whereas the resulting pulse parameters are stored in `qoc_results_<envelope>.csv`.
   
 Internally a multiobjective cost function is utilized to tune the pulse parameters of the basis gates.
 Primarily, the fidelity between the pulse gate and a target unitary is optimized, but the default setting also takes into account the width of the pulse and a time normalization.
@@ -175,7 +126,7 @@ We refer to the exact weighting between these cost functions to the actual value
 
 Besides the cost function and their respective weight, you can also specify the envelope used for the pulse gate.
 
-For further examples we refer to our ["Pulses" notebook](https://github.com/cirKITers/qml-essentials/blob/main/docs/pulses.ipynb) .
+For further examples we refer to our ["Pulses" notebook](https://github.com/cirKITers/jaqsi/blob/main/docs/pulses.ipynb) .
 
 With the optimized pulse parameters we can generate a fidelities plot as follows:
 

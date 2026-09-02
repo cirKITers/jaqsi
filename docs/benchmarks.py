@@ -10,10 +10,10 @@ import csv
 import numpy as np
 import logging
 
-from qml_essentials.jaqsi import (
+from jaqsi import (
     Script,
 )
-from qml_essentials.operations import (
+from jaqsi.operations import (
     H,
     CRX,
     PauliZ,
