@@ -22,6 +22,14 @@ pip install jaqsi
 
 to install our package from [PyPI](https://pypi.org/project/jaqsi/).
 
+For NVIDIA GPUs install the CUDA extra
+
+```
+pip install "jaqsi[cuda13]" # or cuda13 depending on your hardware
+```
+
+JAX then runs on the GPU by default; set `JAX_PLATFORMS=cpu` to force the CPU.
+
 ```python
 import jaqsi
 
