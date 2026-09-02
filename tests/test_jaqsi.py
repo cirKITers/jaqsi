@@ -2,7 +2,6 @@ import pytest
 import jax
 
 import jax.numpy as jnp
-import pennylane as qml
 import numpy as np
 import time
 
@@ -110,28 +109,22 @@ def evol_circuit_plus(t):
     time_evol(t=t, wires=0)
 
 
-def _pennylane_probs(circuit_fn, n_qubits=2) -> np.ndarray:
-    """Run a PennyLane circuit and return the probability vector."""
-    dev = qml.device("default.qubit", wires=n_qubits)
-
-    @qml.qnode(dev)
-    def qnode():
-        circuit_fn()
-        return qml.probs(wires=list(range(n_qubits)))
-
-    return np.array(qnode())
+# Textbook references, independent of jaqsi, for the noise-channel tests.
+_I = np.eye(2)
+_X = np.array([[0, 1], [1, 0]])
+_Y = np.array([[0, -1j], [1j, 0]])
+_Z = np.diag([1, -1])
 
 
-# Helper: run a 1-qubit circuit through PennyLane default.mixed and return ρ
-def _pennylane_density(circuit_fn, n_qubits=1) -> np.ndarray:
-    dev = qml.device("default.mixed", wires=n_qubits)
+def _rx_density(theta: float) -> np.ndarray:
+    """Density matrix of RX(θ)|0⟩ = cos(θ/2)|0⟩ - i sin(θ/2)|1⟩."""
+    psi = np.array([np.cos(theta / 2), -1j * np.sin(theta / 2)])
+    return np.outer(psi, psi.conj())
 
-    @qml.qnode(dev)
-    def qnode():
-        circuit_fn()
-        return qml.density_matrix(wires=list(range(n_qubits)))
 
-    return np.array(qnode())
+def _apply_kraus(rho: np.ndarray, kraus: list) -> np.ndarray:
+    """ρ ↦ Σ_k K_k ρ K_k†."""
+    return sum(k @ rho @ k.conj().T for k in kraus)
 
 
 @pytest.mark.unittest
@@ -499,23 +492,36 @@ class TestMeasurement:
         assert jnp.allclose(ev_pure, ev_density, atol=1e-8)
 
 
-class TestPennylane:
+class TestControlledGates:
     @pytest.mark.unittest
     @pytest.mark.parametrize(
-        "gate_name,jaqsi_gate,pl_gate,theta,prep_both",
+        "gate_name,jaqsi_gate,theta,prep_both,expected",
         [
-            ("CY", CY, qml.CY, None, False),
-            ("CZ", CZ, qml.CZ, None, True),
-            ("CRX", CRX, qml.CRX, 1.3, False),
-            ("CRY", CRY, qml.CRY, 0.9, False),
-            ("CRZ", CRZ, qml.CRZ, 2.1, False),
+            # control |+⟩, target |0⟩ (or |+⟩ if prep_both); expected = analytic probs
+            ("CY", CY, None, False, [0.5, 0, 0, 0.5]),
+            ("CZ", CZ, None, True, [0.25, 0.25, 0.25, 0.25]),
+            (
+                "CRX",
+                CRX,
+                1.3,
+                False,
+                [0.5, 0, np.cos(1.3 / 2) ** 2 / 2, np.sin(1.3 / 2) ** 2 / 2],
+            ),
+            (
+                "CRY",
+                CRY,
+                0.9,
+                False,
+                [0.5, 0, np.cos(0.9 / 2) ** 2 / 2, np.sin(0.9 / 2) ** 2 / 2],
+            ),
+            ("CRZ", CRZ, 2.1, False, [0.5, 0, 0.5, 0]),
         ],
         ids=["CY", "CZ", "CRX", "CRY", "CRZ"],
     )
-    def test_controlled_gate_matches_pennylane(
-        self, gate_name, jaqsi_gate, pl_gate, theta, prep_both
+    def test_controlled_gate_probs(
+        self, gate_name, jaqsi_gate, theta, prep_both, expected
     ) -> None:
-        """Controlled gate probabilities match PennyLane."""
+        """Controlled gate probabilities match the analytic result."""
 
         def jaqsi_circuit():
             H(wires=0)
@@ -526,40 +532,27 @@ class TestPennylane:
             else:
                 jaqsi_gate(wires=[0, 1])
 
-        def pl_circuit():
-            qml.Hadamard(wires=0)
-            if prep_both:
-                qml.Hadamard(wires=1)
-            if theta is not None:
-                pl_gate(theta, wires=[0, 1])
-            else:
-                pl_gate(wires=[0, 1])
-
         script = Script(f=jaqsi_circuit)
         probs_ours = np.array(script.execute(type="probs"))
-        probs_pl = _pennylane_probs(pl_circuit)
 
-        assert np.allclose(probs_ours, probs_pl, atol=1e-10), (
-            f"{gate_name} mismatch:\nours = {probs_ours}\nPL   = {probs_pl}"
+        assert np.allclose(probs_ours, expected, atol=1e-10), (
+            f"{gate_name} mismatch:\nours = {probs_ours}\nexpected = {expected}"
         )
 
     @pytest.mark.unittest
-    def test_rot_matches_pennylane(self) -> None:
-        """Rot(φ, θ, ω) = RZ(ω)·RY(θ)·RZ(φ) must match PennyLane's Rot gate."""
+    def test_rot_probs(self) -> None:
+        """Rot(φ, θ, ω)|0⟩ has probabilities [cos²(θ/2), sin²(θ/2)]."""
         phi, theta, omega = 0.4, 1.2, 2.5
 
         def jaqsi_circuit():
             Rot(phi, theta, omega, wires=0)
 
-        def pl_circuit():
-            qml.Rot(phi, theta, omega, wires=0)
-
         script = Script(f=jaqsi_circuit)
         probs_ours = np.array(script.execute(type="probs"))
-        probs_pl = _pennylane_probs(pl_circuit, n_qubits=1)
+        expected = [np.cos(theta / 2) ** 2, np.sin(theta / 2) ** 2]
 
-        assert np.allclose(probs_ours, probs_pl, atol=1e-10), (
-            f"Rot mismatch:\nours = {probs_ours}\nPL   = {probs_pl}"
+        assert np.allclose(probs_ours, expected, atol=1e-10), (
+            f"Rot mismatch:\nours = {probs_ours}\nexpected = {expected}"
         )
 
     @pytest.mark.unittest
@@ -595,14 +588,30 @@ class TestPennylane:
 class TestNoise:
     @pytest.mark.unittest
     @pytest.mark.parametrize(
-        "channel_name,jaqsi_channel,pl_channel,param,theta,atol",
+        "channel_name,jaqsi_channel,kraus,param,theta,atol",
         [
-            ("BitFlip", BitFlip, qml.BitFlip, 0.15, 0.8, 1e-8),
-            ("PhaseFlip", PhaseFlip, qml.PhaseFlip, 0.2, 1.1, 1e-8),
+            (
+                "BitFlip",
+                BitFlip,
+                lambda p: [np.sqrt(1 - p) * _I, np.sqrt(p) * _X],
+                0.15,
+                0.8,
+                1e-8,
+            ),
+            (
+                "PhaseFlip",
+                PhaseFlip,
+                lambda p: [np.sqrt(1 - p) * _I, np.sqrt(p) * _Z],
+                0.2,
+                1.1,
+                1e-8,
+            ),
             (
                 "DepolarizingChannel",
                 DepolarizingChannel,
-                qml.DepolarizingChannel,
+                lambda p: (
+                    [np.sqrt(1 - p) * _I] + [np.sqrt(p / 3) * P for P in (_X, _Y, _Z)]
+                ),
                 0.12,
                 0.6,
                 1e-7,
@@ -610,12 +619,22 @@ class TestNoise:
             (
                 "AmplitudeDamping",
                 AmplitudeDamping,
-                qml.AmplitudeDamping,
+                lambda g: [
+                    np.diag([1, np.sqrt(1 - g)]),
+                    np.array([[0, np.sqrt(g)], [0, 0]]),
+                ],
                 0.25,
                 1.3,
                 1e-8,
             ),
-            ("PhaseDamping", PhaseDamping, qml.PhaseDamping, 0.3, 0.9, 1e-8),
+            (
+                "PhaseDamping",
+                PhaseDamping,
+                lambda g: [np.diag([1, np.sqrt(1 - g)]), np.diag([0, np.sqrt(g)])],
+                0.3,
+                0.9,
+                1e-8,
+            ),
         ],
         ids=[
             "BitFlip",
@@ -625,30 +644,26 @@ class TestNoise:
             "PhaseDamping",
         ],
     )
-    def test_noise_channel_matches_pennylane(
-        self, channel_name, jaqsi_channel, pl_channel, param, theta, atol
+    def test_noise_channel_density(
+        self, channel_name, jaqsi_channel, kraus, param, theta, atol
     ) -> None:
-        """Noise channel density matrix matches PennyLane default.mixed."""
+        """Noise channel density matrix matches the textbook Kraus representation."""
 
         def jaqsi_circuit(t):
             RX(t, wires=0)
             jaqsi_channel(param, wires=0)
 
-        def pl_circuit():
-            qml.RX(theta, wires=0)
-            pl_channel(param, wires=0)
-
         script = Script(f=jaqsi_circuit)
         rho_ours = np.array(script.execute(type="density", args=(jnp.array(theta),)))
-        rho_pl = _pennylane_density(pl_circuit)
+        rho_ref = _apply_kraus(_rx_density(theta), kraus(param))
 
-        assert np.allclose(rho_ours, rho_pl, atol=atol), (
-            f"{channel_name} mismatch:\nours =\n{rho_ours}\nPL =\n{rho_pl}"
+        assert np.allclose(rho_ours, rho_ref, atol=atol), (
+            f"{channel_name} mismatch:\nours =\n{rho_ours}\nref =\n{rho_ref}"
         )
 
     @pytest.mark.unittest
-    def test_thermal_relaxation_t2_le_t1_matches_pennylane(self) -> None:
-        """ThermalRelaxationError (T₂ ≤ T₁ regime) matches PennyLane default.mixed."""
+    def test_thermal_relaxation_t2_le_t1_density(self) -> None:
+        """ThermalRelaxationError (T₂ ≤ T₁ regime) matches T₁/T₂ decay of ρ."""
         pe, t1, t2, tg = 0.0, 1e-4, 5e-5, 1e-6  # t2 < t1
         theta = 1.0
 
@@ -656,16 +671,18 @@ class TestNoise:
             RX(t, wires=0)
             ThermalRelaxationError(pe, t1, t2, tg, wires=0)
 
-        def pl_circuit():
-            qml.RX(theta, wires=0)
-            qml.ThermalRelaxationError(pe, t1, t2, tg, wires=0)
-
         script = Script(f=jaqsi_circuit)
         rho_ours = np.array(script.execute(type="density", args=(jnp.array(theta),)))
-        rho_pl = _pennylane_density(pl_circuit)
 
-        assert np.allclose(rho_ours, rho_pl, atol=1e-7), (
-            f"ThermalRelaxation (T2≤T1) mismatch:\nours =\n{rho_ours}\nPL =\n{rho_pl}"
+        # pe = 0: populations relax to |0⟩ with exp(-t/T₁), coherences with exp(-t/T₂)
+        rho = _rx_density(theta)
+        e1, e2 = np.exp(-tg / t1), np.exp(-tg / t2)
+        rho_ref = np.array(
+            [[1 - e1 * rho[1, 1], e2 * rho[0, 1]], [e2 * rho[1, 0], e1 * rho[1, 1]]]
+        )
+
+        assert np.allclose(rho_ours, rho_ref, atol=1e-7), (
+            f"ThermalRelaxation (T2≤T1) mismatch:\nours =\n{rho_ours}\nref =\n{rho_ref}"
         )
 
     @pytest.mark.unittest
@@ -1159,10 +1176,8 @@ def test_evolve_multi_term_time_dependent_unitarity() -> None:
 
 @pytest.mark.benchmark
 @pytest.mark.unittest
-@pytest.mark.parametrize(
-    "mode,speedup", [("probs", 100), ("expval", 100), ("state", 100), ("density", 70)]
-)
-def test_mode_performances(benchmark, mode, speedup) -> None:
+@pytest.mark.parametrize("mode", ["probs", "expval", "state", "density"])
+def test_mode_performances(benchmark, mode) -> None:
     """
     Note, this test requires codspeed to be activated. Run with
     pytest tests/test_jaqsi.py::test_mode_performances -x -s --codspeed
@@ -1209,7 +1224,7 @@ def test_mode_performances(benchmark, mode, speedup) -> None:
             js_times.append(time.perf_counter() - t0)
         return js_times, res_js
 
-    js_times, res_js = benchmark(js_benchmark)
+    js_times, _ = benchmark(js_benchmark)
     t_js = float(np.mean(js_times))
     std_js = float(np.std(js_times))
 
@@ -1217,55 +1232,6 @@ def test_mode_performances(benchmark, mode, speedup) -> None:
         f"Jaqsi {mode} ({n_qubits}q, batch={batch_size}, avg {n_iters}): "
         f"{t_js * 1000:.2f} ± {std_js * 1000:.2f} ms"
     )
-
-    # --- PennyLane ---
-    dev = qml.device("default.qubit", wires=n_qubits)
-
-    pl_return_map = {
-        "density": lambda: qml.density_matrix(wires=range(n_qubits)),
-        "state": lambda: qml.state(),
-        "probs": lambda: qml.probs(wires=range(n_qubits)),
-        "expval": lambda: [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)],
-    }
-
-    @qml.qnode(dev)
-    def pl_circuit(phi):
-        for i in range(n_qubits):
-            qml.Hadamard(wires=i)
-        for i in range(n_qubits):
-            qml.CRX(phi, wires=[i, (i + 1) % n_qubits])
-        return pl_return_map[mode]()
-
-    _ = pl_circuit(all_phis[0])
-
-    def pl_benchmark():
-        pl_times = []
-        for i in range(n_iters):
-            t0 = time.perf_counter()
-            res_pl = pl_circuit(all_phis[i])
-            pl_times.append(time.perf_counter() - t0)
-        t_pl = float(np.mean(pl_times))
-        std_pl = float(np.std(pl_times))
-        return t_pl, std_pl, res_pl
-
-    t_pl, std_pl, res_pl = pl_benchmark()
-
-    logger.info(
-        f"PennyLane {mode} ({n_qubits}q, batch={batch_size}, avg {n_iters}): "
-        f"{t_pl * 1000:.2f} ± {std_pl * 1000:.2f} ms"
-    )
-    ratio = t_pl / t_js
-    logger.info(f"Ratio pl/jaqsi: {ratio:.2f}x")
-    assert ratio >= speedup, (
-        f"Jaqsi not significantly faster than PennyLane. {ratio:2f}x"
-    )
-
-    res_pl_arr = jnp.array(res_pl)
-    if res_pl_arr.shape != res_js.shape:
-        res_pl_arr = res_pl_arr.T
-
-    assert jnp.allclose(res_js, res_pl_arr, atol=1e-10), "Results do not match"
-    logger.info("Results match")
 
 
 class TestShots:
