@@ -663,8 +663,13 @@ def resolve_pending(tape: List[Operation]) -> List[int]:
         if Evolution._solver_defaults["host_offload"]:
             # A Python error callback cannot run inside a host-offloaded
             # region, so solve with ``throw=False`` there and check on device.
-            with compute_on("device_host"):
-                U = _solve_group(first._solver_for(False), inputs, in_axes, len(ops))
+            solve = first._solver_for(False)
+            offload = compute_on(
+                lambda inp: _solve_group(solve, inp, in_axes, len(ops)),
+                compute_type="device_host",
+                out_memory_spaces=jax.memory.Space.Device,
+            )
+            U = offload(inputs)
             if first._throw:
                 U = eqx.error_if(
                     U, jnp.isnan(U).any(), "ODE solver failed (max_steps reached?)"
