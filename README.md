@@ -29,6 +29,7 @@ pip install "jaqsi[cuda13]" # or cuda13 depending on your hardware
 ```
 
 JAX then runs on the GPU by default; set `JAX_PLATFORMS=cpu` to force the CPU.
+Note that pulse-level simulation is supported but not necessarily ideal on GPU; see the [pulses docs](docs/pulses.md) for details.
 
 ```python
 import jaqsi
