@@ -18,10 +18,6 @@ Curious? :eyes: Installing this package is as simple as with any other package :
 ```
 pip install jaqsi
 ```
-or with the [uv package manager](https://github.com/astral-sh/uv):
-```
-uv add jaqsi
-```
 
 Once you have set things up, go ahead and checkout [how to use JAQSI](usage.md).
 
