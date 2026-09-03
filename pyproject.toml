@@ -6,7 +6,7 @@ authors = [
     { name = "Melvin Strobl", email = "melvin.strobl@kit.edu" },
     { name = "Maja Franz", email = "maja.franz@oth-regensburg.de" },
 ]
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.15"
 readme = "README.md"
 license = "MIT"
 maintainers = [{ name = "Melvin Strobl", email = "melvin.strobl@kit.edu" }]
@@ -19,9 +19,9 @@ keywords = [
 dependencies = [
     "diffrax>=0.7.2",
     "equinox>=0.13.4",
-    "jax>=0.9.0.1",
-    "jaxlib>=0.9.0.1",
-    "optax>=0.2.7",
+    "jax>=0.11.1",
+    "jaxlib>=0.11.1",
+    "optax>=0.2.8",
     "psutil>=7.2.2",
     "scipy>=1.17.0",
 ]
@@ -33,6 +33,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Scientific/Engineering :: Physics",
 ]
@@ -42,6 +43,10 @@ Homepage = "https://cirkiters.github.io/jaqsi/"
 Repository = "https://github.com/cirKITers/jaqsi"
 Documentation = "https://cirkiters.github.io/jaqsi/"
 
+[project.optional-dependencies]
+cuda12 = ["jax[cuda12]>=0.9.0.1"]
+cuda13 = ["jax[cuda13]>=0.9.0.1"]
+
 [dependency-groups]
 dev = [
     "black>=25.12.0",
@@ -49,7 +54,6 @@ dev = [
     "ruff>=0.12.0",
     "licensecheck>=2025.1.0",
     "matplotlib>=3.10.8",
-    "pennylane>=0.44.0",
     "pre-commit>=4.5.1",
     "pytest>=8.4.2",
     "pytest-codspeed>=4.3.0",

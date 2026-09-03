@@ -24,6 +24,8 @@ Time evolution is reached through the Hamiltonian objects themselves::
     H_t.evolve(name="RX")([params], t)          # gate factory
 """
 
+import jax
+
 from jaqsi.script import Script, make_hashable
 from jaqsi.evolution import Evolution
 from jaqsi.operations import (
@@ -117,6 +119,11 @@ from jaqsi import (  # noqa: F401  (submodule access: ``from jaqsi import operat
     evolution,
     script,
 )
+
+# XLA on Ampere+ GPUs computes float32/complex64 matmuls in TF32 (10-bit
+# mantissa) by default.  Every gate application is a dot, so force full
+# float32 precision.  No effect on CPU.
+jax.config.update("jax_default_matmul_precision", "highest")
 
 __all__ = [
     # Execution

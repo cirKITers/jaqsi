@@ -11,7 +11,7 @@ to :meth:`Evolution.evolve`.  :class:`Evolution` is also where solver defaults
 live (:meth:`Evolution.set_solver_defaults`).
 """
 
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import math
 import threading
 
@@ -19,6 +19,7 @@ import diffrax
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
+from jax.experimental.compute_on import compute_on
 import equinox as eqx
 
 from jaqsi.operations import (
@@ -74,11 +75,20 @@ class Evolution:
     # integrators (ignored for ``dopri8``).  Choose it so that ``h =
     # T/N`` resolves the fastest oscillation in ``H(t)`` (~few steps
     # per period of the highest frequency).
+    #
+    # ``host_offload`` runs the ODE solves on the host CPU while the rest
+    # of the circuit stays on the accelerator (no effect on a CPU
+    # backend).  An adaptive solve on a 2x2 / 4x4 matrix is launch-latency
+    # bound on a GPU, so this pays off below roughly a thousand solves per
+    # call and loses above; hence opt-in.  Works for forward simulation
+    # under ``jit``/``vmap`` and for an eager ``jax.grad``; XLA (jax 0.9)
+    # fails to compile the offloaded loop inside ``jax.jit(jax.grad(...))``.
     _solver_defaults: dict = {
         "max_steps": 2**13,
         "throw": True,
         "solver": "dopri8",
         "magnus_steps": 256,
+        "host_offload": False,
     }
     _valid_solvers = ("dopri8", "dopri5", "magnus2", "magnus4")
 
@@ -89,6 +99,7 @@ class Evolution:
         throw: Optional[bool] = None,
         solver: Optional[str] = None,
         magnus_steps: Optional[int] = None,
+        host_offload: Optional[bool] = None,
     ) -> dict:
         """Update class-level solver defaults; return the previous values.
 
@@ -98,6 +109,11 @@ class Evolution:
         Args:
             max_steps: New default for ``max_steps`` (ignored if ``None``).
             throw: New default for ``throw`` (ignored if ``None``).
+            solver: New default integrator (ignored if ``None``).
+            magnus_steps: New default Magnus substep count (ignored if ``None``).
+            host_offload: Solve the pulse ODEs on the host CPU while the
+                circuit runs on the accelerator (ignored if ``None``).  Not
+                supported inside ``jax.jit(jax.grad(...))``.
 
         Returns:
             Dictionary with the previous values of the updated keys.
@@ -119,6 +135,9 @@ class Evolution:
         if magnus_steps is not None:
             prev["magnus_steps"] = cls._solver_defaults["magnus_steps"]
             cls._solver_defaults["magnus_steps"] = int(magnus_steps)
+        if host_offload is not None:
+            prev["host_offload"] = cls._solver_defaults["host_offload"]
+            cls._solver_defaults["host_offload"] = bool(host_offload)
         return prev
 
     @classmethod
@@ -268,12 +287,18 @@ class Evolution:
             """
             A_all = neg_iH_split[:, 0]
             B_all = neg_iH_split[:, 1]
+            # Integrate in normalised time ``s`` on [0, 1] with
+            # ``t = t0 + s * span``.  Passing a (possibly batched) time span
+            # as loop bounds instead sends XLA's CPU simplifier into a loop
+            # when the solve is vmapped over gates (see ``resolve_pending``).
+            span = t1 - t0
 
-            def rhs(t, y, args):
+            def rhs(s, y, args):
+                t = t0 + s * span
                 # Each coefficient function must return a scalar value; some
                 # call sites pass a shape-(1,) param array, so coerce to a
                 # true scalar before stacking.
-                c = jnp.stack(
+                c = span * jnp.stack(
                     [
                         jnp.asarray(_coeff_fns[i](args[i], t)).reshape(())
                         for i in range(n_terms)
@@ -298,8 +323,8 @@ class Evolution:
             sol = diffrax.diffeqsolve(
                 diffrax.ODETerm(rhs),
                 solver,
-                t0=t0,
-                t1=t1,
+                t0=_rdtype(0.0),
+                t1=_rdtype(1.0),
                 dt0=None,
                 y0=y0,
                 args=params,
@@ -477,30 +502,34 @@ class Evolution:
         )
 
         # Cache key:  every coeff fn's code object (same shape of pulse
-        # fns -> same JIT program) plus dim, tolerances, and solver
-        # budget / throw flag (different budgets mean different XLA
-        # programs).  We use the code object itself (hashable, identity-
-        # equal) rather than ``id(fn.__code__)``: ids can be reused for
-        # later code objects after the original is garbage-collected,
-        # which would silently return a stale compiled solver for a
-        # different pulse shape.  Holding the code object in the cache
-        # keeps it alive for as long as the cached program is valid.
-        cache_key = (
+        # fns -> same JIT program) plus dim, tolerances, solver choice and
+        # budget (different budgets mean different XLA programs); the
+        # ``throw`` flag is appended per solver variant.  We use the code
+        # object itself (hashable, identity-equal) rather than
+        # ``id(fn.__code__)``: ids can be reused for later code objects
+        # after the original is garbage-collected, which would silently
+        # return a stale compiled solver for a different pulse shape.
+        # Holding the code object in the cache keeps it alive for as long
+        # as the cached program is valid.
+        base_key = (
             tuple(fn.__code__ for fn in coeff_fns),
             dim,
             atol,
             rtol,
             max_steps,
-            throw,
             solver_name,
             magnus_steps,
         )
 
-        with cls._evolve_solver_cache_lock:
-            _solve = cls._evolve_solver_cache.get(cache_key)
-        if _solve is None:
+        def solver_for(throw_flag: bool) -> Callable:
+            """Return the cached compiled solver for this pulse shape."""
+            cache_key = base_key + (throw_flag,)
+            with cls._evolve_solver_cache_lock:
+                _solve = cls._evolve_solver_cache.get(cache_key)
+            if _solve is not None:
+                return _solve
             if solver_name in ("magnus2", "magnus4"):
-                _solve = cls._build_magnus_evolve_solver(
+                return cls._build_magnus_evolve_solver(
                     cache_key=cache_key,
                     coeff_fns=coeff_fns,
                     n_terms=n_terms,
@@ -508,19 +537,18 @@ class Evolution:
                     solver_name=solver_name,
                     magnus_steps=magnus_steps,
                 )
-            else:
-                _solve = cls._build_diffrax_evolve_solver(
-                    cache_key=cache_key,
-                    coeff_fns=coeff_fns,
-                    n_terms=n_terms,
-                    dim=dim,
-                    atol=atol,
-                    rtol=rtol,
-                    max_steps=max_steps,
-                    throw=throw,
-                    solver_name=solver_name,
-                    _rdtype=_rdtype,
-                )
+            return cls._build_diffrax_evolve_solver(
+                cache_key=cache_key,
+                coeff_fns=coeff_fns,
+                n_terms=n_terms,
+                dim=dim,
+                atol=atol,
+                rtol=rtol,
+                max_steps=max_steps,
+                throw=throw_flag,
+                solver_name=solver_name,
+                _rdtype=_rdtype,
+            )
 
         def _apply(coeff_args, T) -> Operation:
             """Evolve under the (multi-term) time-dependent Hamiltonian.
@@ -534,7 +562,10 @@ class Evolution:
                     ``[0, T]``; 2-element -> integrate on ``[T[0], T[1]]``.
 
             Returns:
-                An :class:`Operation` wrapping the computed unitary.
+                A :class:`PendingEvolution` whose unitary is solved lazily:
+                batched with the other pending gates of the tape by
+                :func:`resolve_pending`, or alone on first access of
+                ``.matrix``.
             """
             # Normalise to a tuple of length n_terms.  Accept a bare
             # single-term arg for backward compat.
@@ -563,8 +594,129 @@ class Evolution:
                 t0 = T_arr[0]
                 t1 = T_arr[1]
 
-            U = _solve(neg_iH_split, params, t0, t1)
-
-            return Operation(wires=wires, matrix=U, name=name)
+            return PendingEvolution(
+                wires=wires,
+                name=name,
+                solver_for=solver_for,
+                throw=throw,
+                group_key=(base_key, throw, tuple(jnp.shape(p) for p in params)),
+                inputs=(neg_iH_split, params, t0, t1),
+            )
 
         return _apply
+
+
+class PendingEvolution(Operation):
+    """Time-evolution gate whose unitary is solved lazily.
+
+    Returned by the gate factories of :meth:`Evolution.evolve` for
+    time-dependent Hamiltonians.  Deferring the ODE solve lets
+    :func:`resolve_pending` batch all pending gates of a tape into one
+    ``jax.vmap`` call per pulse shape; reading :attr:`matrix` before that
+    solves this gate on its own.
+    """
+
+    def __init__(
+        self,
+        wires: Union[int, List[int]],
+        name: Optional[str],
+        solver_for: Callable[[bool], Callable],
+        throw: bool,
+        group_key: tuple,
+        inputs: tuple,
+    ) -> None:
+        super().__init__(wires=wires, name=name)
+        self._solver_for = solver_for
+        self._throw = throw
+        self._group_key = group_key
+        self._inputs = inputs
+
+    @property
+    def matrix(self) -> jnp.ndarray:
+        if self._matrix is None:
+            self._matrix = self._solver_for(self._throw)(*self._inputs)
+        return self._matrix
+
+
+def resolve_pending(tape: List[Operation]) -> List[int]:
+    """Solve all unresolved :class:`PendingEvolution` gates on *tape* in batches.
+
+    Gates sharing a solver (coefficient functions, matrix size, solver
+    settings) and parameter shapes are stacked and solved with a single
+    ``jax.vmap`` call, so a circuit compiles to one ODE loop per pulse shape
+    instead of one per gate.  With ``host_offload`` enabled (see
+    :meth:`Evolution.set_solver_defaults`) the solves run on the host CPU
+    while the rest of the program stays on the accelerator; solver failures
+    are then re-raised on the device when ``throw`` is set.
+
+    Returns:
+        Number of gates solved per batched call.
+    """
+    groups: Dict[tuple, List[PendingEvolution]] = {}
+    for op in tape:
+        if isinstance(op, PendingEvolution) and op._matrix is None:
+            groups.setdefault(op._group_key, []).append(op)
+
+    for ops in groups.values():
+        inputs, in_axes = _stack_inputs(ops)
+        first = ops[0]
+        if Evolution._solver_defaults["host_offload"]:
+            # A Python error callback cannot run inside a host-offloaded
+            # region, so solve with ``throw=False`` there and check on device.
+            solve = first._solver_for(False)
+            offload = compute_on(
+                lambda inp: _solve_group(solve, inp, in_axes, len(ops)),
+                compute_type="device_host",
+                out_memory_spaces=jax.memory.Space.Device,
+            )
+            U = offload(inputs)
+            if first._throw:
+                U = eqx.error_if(
+                    U, jnp.isnan(U).any(), "ODE solver failed (max_steps reached?)"
+                )
+        else:
+            U = _solve_group(first._solver_for(first._throw), inputs, in_axes, len(ops))
+        for i, op in enumerate(ops):
+            op._matrix = U[i]
+
+    return [len(ops) for ops in groups.values()]
+
+
+def _same_leaf(a: Any, b: Any) -> bool:
+    """Whether two solver inputs are known to be equal at trace time."""
+    if a is b:
+        return True
+    if isinstance(a, jax.core.Tracer) or isinstance(b, jax.core.Tracer):
+        return False
+    return jnp.shape(a) == jnp.shape(b) and bool(jnp.array_equal(a, b))
+
+
+def _stack_inputs(ops: List["PendingEvolution"]) -> Tuple[tuple, tuple]:
+    """Stack the solver inputs of a group along a new leading axis.
+
+    Inputs that are identical across the group (typically the Hamiltonian
+    matrices and the time span) are left unbatched: vmapping over a
+    batched time span inside an outer ``vmap`` sends XLA's simplifier into
+    a loop and costs runtime for no benefit.
+    """
+    treedef = jax.tree_util.tree_structure(ops[0]._inputs)
+    leaves, axes = [], []
+    for column in zip(*[jax.tree_util.tree_leaves(op._inputs) for op in ops]):
+        if all(_same_leaf(column[0], x) for x in column[1:]):
+            leaves.append(column[0])
+            axes.append(None)
+        else:
+            leaves.append(jnp.stack(column))
+            axes.append(0)
+    return (
+        jax.tree_util.tree_unflatten(treedef, leaves),
+        jax.tree_util.tree_unflatten(treedef, axes),
+    )
+
+
+def _solve_group(solve: Callable, inputs: tuple, in_axes: tuple, n: int) -> jnp.ndarray:
+    """Run *solve* over the group, returning ``(n, dim, dim)`` unitaries."""
+    if not any(ax == 0 for ax in jax.tree_util.tree_leaves(in_axes)):
+        U = solve(*inputs)  # every gate in the group is the same solve
+        return jnp.broadcast_to(U, (n,) + U.shape)
+    return jax.vmap(solve, in_axes=in_axes)(*inputs)
