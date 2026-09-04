@@ -10,6 +10,7 @@ import time
 from jaqsi import (
     Script,
     Evolution,
+    make_hashable,
     partial_trace,
     marginalize_probs,
     build_parity_observable,
@@ -303,7 +304,8 @@ class TestEvolve:
         prev = Evolution.set_solver_defaults(max_steps=4, throw=True)
         try:
             with pytest.raises(Exception):
-                ph.evolve()([jnp.array([1.0])], 1.0)
+                # The solve is lazy: the error surfaces when the unitary is used.
+                ph.evolve()([jnp.array([1.0])], 1.0).matrix
         finally:
             Evolution.set_solver_defaults(**prev)
 
@@ -1836,6 +1838,7 @@ class TestChunk:
             arg_shapes,
             (),
             UnitaryGates.batch_gate_error,
+            make_hashable(Evolution._solver_defaults),
             False,  # has_init
             None,  # fingerprint
         )
@@ -2008,6 +2011,7 @@ class TestChunk:
             arg_shapes,
             (),
             UnitaryGates.batch_gate_error,
+            make_hashable(Evolution._solver_defaults),
             False,  # has_init
             None,  # fingerprint
         )
@@ -2055,6 +2059,7 @@ class TestChunk:
             arg_shapes,
             (),
             UnitaryGates.batch_gate_error,
+            make_hashable(Evolution._solver_defaults),
             False,  # has_init
             None,  # fingerprint
         )
