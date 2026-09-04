@@ -101,6 +101,10 @@ Evolution.set_solver_defaults(solver="magnus4", magnus_steps=128)
 
 The `magnus_steps` argument sets the number of fixed substeps for the Magnus integrators and is ignored for the adaptive Dormand-Prince solvers (`dopri8`, `dopri5`).
 
+Note that pulse gates are solved lazily when the circuit is simulated.
+This means that all gates of a tape that share a pulse shape are integrated in one batched solve, and gates with identical parameters (the same fixed-angle rotation on several wires, every CZ) are solved only once.
+This keeps compile times short and matters most on a GPU, where each separate solve costs a few milliseconds of launch latency.
+
 ## Quantum Optimal Control (QOC)
 
 Our package provides a QOC interface for directly optimizing pulse parameters for specific gates.  
