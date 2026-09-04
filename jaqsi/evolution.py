@@ -12,10 +12,12 @@ live (:meth:`Evolution.set_solver_defaults`).
 """
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import inspect
 import math
 import threading
 
 import diffrax
+import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg
@@ -481,20 +483,25 @@ class Evolution:
         n_terms = ph.n_terms
         dim = H_mats[0].shape[0]
 
-        # Pre-compute -i*H_i for each term and split into real / imaginary
-        # parts so the ODE RHS uses only real arithmetic.  Final shape:
-        # (n_terms, 2, dim, dim).
-        neg_iH_split_per_term = []
-        for H_mat in H_mats:
-            neg_iH = -1j * H_mat
-            neg_iH_split_per_term.append(
-                jnp.stack([jnp.real(neg_iH), jnp.imag(neg_iH)], axis=0)
-            )
-        neg_iH_split = jnp.stack(neg_iH_split_per_term, axis=0)
-
         # Real dtype matching the precision mode
         # consider decreasing if no convergence
         _rdtype = jnp.float64 if jax.config.x64_enabled else jnp.float32
+        np_rdtype = np.float64 if jax.config.x64_enabled else np.float32
+
+        # Pre-compute -i*H_i for each term and split into real / imaginary
+        # parts so the ODE RHS uses only real arithmetic.  Final shape:
+        # (n_terms, 2, dim, dim).  Concrete matrices are kept in numpy so
+        # that ``resolve_pending`` can recognise identical gates in a trace.
+        xp = jnp if any(isinstance(H, jax.core.Tracer) for H in H_mats) else np
+        neg_iH_split = xp.stack(
+            [
+                xp.stack([xp.real(-1j * H_mat), xp.imag(-1j * H_mat)], axis=0)
+                for H_mat in H_mats
+            ],
+            axis=0,
+        )
+        if xp is np:
+            neg_iH_split = neg_iH_split.astype(np_rdtype)
 
         # Pick tolerances according to precision + some headroom
         atol, rtol, max_steps, throw, solver_name, magnus_steps = (
@@ -586,9 +593,12 @@ class Evolution:
             # on [0, T]) or a 2-element sequence/array (=> integrate on [T[0], T[1]]).
             # Let ``_solve`` cast t0/t1 to its working dtype; we only need the
             # array form to know the rank.
-            T_arr = jnp.asarray(T, dtype=_rdtype)
+            if isinstance(T, jax.core.Tracer):
+                T_arr = jnp.asarray(T, dtype=_rdtype)
+            else:
+                T_arr = np.asarray(T, dtype=np_rdtype)
             if T_arr.ndim == 0:
-                t0 = _rdtype(0.0)
+                t0 = np_rdtype(0.0)
                 t1 = T_arr
             else:
                 t0 = T_arr[0]
@@ -644,37 +654,79 @@ def resolve_pending(tape: List[Operation]) -> List[int]:
     Gates sharing a solver (coefficient functions, matrix size, solver
     settings) and parameter shapes are stacked and solved with a single
     ``jax.vmap`` call, so a circuit compiles to one ODE loop per pulse shape
-    instead of one per gate.  With ``host_offload`` enabled (see
-    :meth:`Evolution.set_solver_defaults`) the solves run on the host CPU
-    while the rest of the program stays on the accelerator; solver failures
-    are then re-raised on the device when ``throw`` is set.
+    instead of one per gate.  Gates with identical inputs are solved once.
+    With ``host_offload`` enabled (see :meth:`Evolution.set_solver_defaults`)
+    the solves run on the host CPU while the rest of the program stays on
+    the accelerator; solver failures are then re-raised on the device when
+    ``throw`` is set.
 
     Returns:
-        Number of gates solved per batched call.
+        Number of distinct solves per batched call.
     """
     groups: Dict[tuple, List[PendingEvolution]] = {}
     for op in tape:
         if isinstance(op, PendingEvolution) and op._matrix is None:
             groups.setdefault(op._group_key, []).append(op)
 
-    for ops in groups.values():
+    sizes = []
+    for group in groups.values():
+        # Identical gates (a repeated fixed-angle rotation, the same CZ on
+        # several wire pairs) are solved once.  XLA deduplicated them across
+        # sequential solves; stacked copies it cannot.
+        unique: Dict[tuple, List[PendingEvolution]] = {}
+        for op in group:
+            unique.setdefault(_signature(op._inputs), []).append(op)
+        ops = [members[0] for members in unique.values()]
+        sizes.append(len(ops))
+
         inputs, in_axes = _stack_inputs(ops)
         first = ops[0]
         if Evolution._solver_defaults["host_offload"]:
             # A Python error callback cannot run inside a host-offloaded
             # region, so solve with ``throw=False`` there and check on device.
-            with compute_on("device_host"):
-                U = _solve_group(first._solver_for(False), inputs, in_axes, len(ops))
+            solve = first._solver_for(False)
+            U = _on_host(lambda *a: _solve_group(solve, a, in_axes, len(ops)))(*inputs)
             if first._throw:
                 U = eqx.error_if(
                     U, jnp.isnan(U).any(), "ODE solver failed (max_steps reached?)"
                 )
         else:
             U = _solve_group(first._solver_for(first._throw), inputs, in_axes, len(ops))
-        for i, op in enumerate(ops):
-            op._matrix = U[i]
+        for i, members in enumerate(unique.values()):
+            for op in members:
+                op._matrix = U[i]
 
-    return [len(ops) for ops in groups.values()]
+    return sizes
+
+
+def _on_host(fn: Callable) -> Callable:
+    """Wrap *fn* to run on the host CPU inside an accelerator program.
+
+    ``jax.experimental.compute_on`` is a context manager up to jax 0.10 and a
+    function wrapper with keyword-only arguments from jax 0.11.
+    """
+    if "out_memory_spaces" in inspect.signature(compute_on).parameters:
+        return compute_on(
+            fn, compute_type="device_host", out_memory_spaces=jax.memory.Space.Device
+        )
+
+    def wrapped(*args):
+        with compute_on("device_host"):
+            return fn(*args)
+
+    return wrapped
+
+
+def _leaf_key(x: Any) -> tuple:
+    """Hashable identity of a solver input: value if concrete, else object id."""
+    if isinstance(x, jax.core.Tracer):
+        return ("tracer", id(x))
+    a = np.asarray(x)
+    return (a.shape, a.dtype.str, a.tobytes())
+
+
+def _signature(inputs: tuple) -> tuple:
+    return tuple(_leaf_key(x) for x in jax.tree_util.tree_leaves(inputs))
 
 
 def _same_leaf(a: Any, b: Any) -> bool:
@@ -683,7 +735,7 @@ def _same_leaf(a: Any, b: Any) -> bool:
         return True
     if isinstance(a, jax.core.Tracer) or isinstance(b, jax.core.Tracer):
         return False
-    return jnp.shape(a) == jnp.shape(b) and bool(jnp.array_equal(a, b))
+    return bool(np.array_equal(np.asarray(a), np.asarray(b)))
 
 
 def _stack_inputs(ops: List["PendingEvolution"]) -> Tuple[tuple, tuple]:
