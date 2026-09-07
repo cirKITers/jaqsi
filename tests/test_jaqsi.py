@@ -3083,3 +3083,29 @@ class TestInitialState:
                 in_axes=(0,),
                 initial_state=jnp.zeros((2, 2, 2), dtype=complex),
             )
+
+
+@pytest.mark.unittest
+@pytest.mark.parametrize(
+    "gate, wires",
+    [
+        (lambda **kw: CRX(0.7, **kw), [2, 0]),  # control above target in wire order
+        (lambda **kw: RY(0.7, **kw), [3]),  # single-qubit gate on the last wire
+        (CCX, [3, 0, 2]),  # three-wire gate takes the einsum path
+    ],
+    ids=["CRX_reversed", "RY_last", "CCX_scrambled"],
+)
+def test_simulate_pure_matches_lifted_matrix(gate, wires) -> None:
+    """The statevector kernel must match the dense gate matrix for any wire order."""
+    from jaqsi import simulation
+
+    n_qubits = 4
+    ops = [RY(0.3 * (i + 1), wires=i, record=False) for i in range(n_qubits)]
+    ops.append(gate(wires=wires, record=False))
+
+    state = simulation.simulate_pure(ops, n_qubits)
+
+    ref = jnp.eye(2**n_qubits)[0]
+    for op in ops:
+        ref = op.lifted_matrix(n_qubits) @ ref
+    assert jnp.allclose(state, ref, atol=1e-12)
