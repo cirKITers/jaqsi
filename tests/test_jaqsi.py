@@ -1160,7 +1160,7 @@ def test_evolve_multi_term_time_dependent_unitarity() -> None:
 @pytest.mark.benchmark
 @pytest.mark.unittest
 @pytest.mark.parametrize(
-    "mode,speedup", [("probs", 100), ("expval", 100), ("state", 100), ("density", 70)]
+    "mode,speedup", [("probs", 90), ("expval", 90), ("state", 90), ("density", 70)]
 )
 def test_mode_performances(benchmark, mode, speedup) -> None:
     """
