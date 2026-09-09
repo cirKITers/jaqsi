@@ -10,16 +10,6 @@ authors:
   - family-names: "Kuehn"
     given-names: "Eileen"
     orcid: "https://orcid.org/0000-0002-8034-8837"
-  - family-names: "van der Horst"
-    given-names: "Lucas"
-    orcid: "https://orcid.org/0009-0003-0609-9582"
-  - family-names: "Schillinger"
-    given-names: "Paul"
-    orcid: "https://orcid.org/0009-0009-1566-6220"
-  - family-names: "Hunz"
-    given-names: "Jonathan"
-  - family-names: "Wahl"
-    given-names: "Johannes"
 title: "JAQSI"
 version: 0.1.0
 date-released: 2026-09-01

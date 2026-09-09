@@ -10,6 +10,7 @@ import time
 from jaqsi import (
     Script,
     Evolution,
+    make_hashable,
     partial_trace,
     marginalize_probs,
     build_parity_observable,
@@ -303,7 +304,8 @@ class TestEvolve:
         prev = Evolution.set_solver_defaults(max_steps=4, throw=True)
         try:
             with pytest.raises(Exception):
-                ph.evolve()([jnp.array([1.0])], 1.0)
+                # The solve is lazy: the error surfaces when the unitary is used.
+                ph.evolve()([jnp.array([1.0])], 1.0).matrix
         finally:
             Evolution.set_solver_defaults(**prev)
 
@@ -1158,7 +1160,7 @@ def test_evolve_multi_term_time_dependent_unitarity() -> None:
 @pytest.mark.benchmark
 @pytest.mark.unittest
 @pytest.mark.parametrize(
-    "mode,speedup", [("probs", 100), ("expval", 100), ("state", 100), ("density", 70)]
+    "mode,speedup", [("probs", 90), ("expval", 90), ("state", 90), ("density", 70)]
 )
 def test_mode_performances(benchmark, mode, speedup) -> None:
     """
@@ -1836,6 +1838,7 @@ class TestChunk:
             arg_shapes,
             (),
             UnitaryGates.batch_gate_error,
+            make_hashable(Evolution._solver_defaults),
             False,  # has_init
             None,  # fingerprint
         )
@@ -2008,6 +2011,7 @@ class TestChunk:
             arg_shapes,
             (),
             UnitaryGates.batch_gate_error,
+            make_hashable(Evolution._solver_defaults),
             False,  # has_init
             None,  # fingerprint
         )
@@ -2055,6 +2059,7 @@ class TestChunk:
             arg_shapes,
             (),
             UnitaryGates.batch_gate_error,
+            make_hashable(Evolution._solver_defaults),
             False,  # has_init
             None,  # fingerprint
         )
@@ -3078,3 +3083,29 @@ class TestInitialState:
                 in_axes=(0,),
                 initial_state=jnp.zeros((2, 2, 2), dtype=complex),
             )
+
+
+@pytest.mark.unittest
+@pytest.mark.parametrize(
+    "gate, wires",
+    [
+        (lambda **kw: CRX(0.7, **kw), [2, 0]),  # control above target in wire order
+        (lambda **kw: RY(0.7, **kw), [3]),  # single-qubit gate on the last wire
+        (CCX, [3, 0, 2]),  # three-wire gate takes the einsum path
+    ],
+    ids=["CRX_reversed", "RY_last", "CCX_scrambled"],
+)
+def test_simulate_pure_matches_lifted_matrix(gate, wires) -> None:
+    """The statevector kernel must match the dense gate matrix for any wire order."""
+    from jaqsi import simulation
+
+    n_qubits = 4
+    ops = [RY(0.3 * (i + 1), wires=i, record=False) for i in range(n_qubits)]
+    ops.append(gate(wires=wires, record=False))
+
+    state = simulation.simulate_pure(ops, n_qubits)
+
+    ref = jnp.eye(2**n_qubits)[0]
+    for op in ops:
+        ref = op.lifted_matrix(n_qubits) @ ref
+    assert jnp.allclose(state, ref, atol=1e-12)

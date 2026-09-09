@@ -6,6 +6,7 @@ from typing import Optional, List, Union, Dict, Callable, Tuple
 import csv
 import jax.numpy as jnp
 import jax
+import numpy as np
 
 from jaqsi.operations import Hamiltonian
 from jaqsi.evolution import Evolution
@@ -1010,6 +1011,34 @@ class PulseInformation:
             gate.params = jax.random.uniform(sub_key, (len(gate),))
 
 
+def _is_concrete(*xs) -> bool:
+    return not any(
+        isinstance(leaf, jax.core.Tracer)
+        for x in xs
+        for leaf in jax.tree_util.tree_leaves(x)
+    )
+
+
+def _pack_params(pulse_params, keep: slice, w) -> jnp.ndarray:
+    """Concatenate ``pulse_params[keep]`` and ``w`` into one parameter vector.
+
+    Stays in numpy when nothing is traced: inside a jit trace every jnp value
+    is a tracer, and only concrete parameters let
+    :func:`~jaqsi.evolution.resolve_pending` recognise identical gates.
+    """
+    xp = np if _is_concrete(pulse_params, w) else jnp
+    return xp.concatenate(
+        [xp.ravel(xp.asarray(pulse_params))[keep], xp.ravel(xp.asarray(w))]
+    )
+
+
+def _duration(pulse_params):
+    """Last pulse parameter (the gate duration), concrete when possible."""
+    if _is_concrete(pulse_params):
+        return np.asarray(pulse_params)[-1]
+    return pulse_params[-1]
+
+
 class PulseGates:
     """Pulse-level implementations of quantum gates.
 
@@ -1220,7 +1249,7 @@ class PulseGates:
         pulse_params = PulseInformation.RX.split_params(pulse_params)
 
         PulseGates._record_pulse_event("RX", w, wires, pulse_params)
-        t = pulse_params[-1]
+        t = _duration(pulse_params)
 
         # Proper interaction-picture drive Hamiltonian for RX:
         #   H_I(τ) = Ω(τ)·cos(ω_c·τ) · [ cos(ω_q·τ)·X − sin(ω_q·τ)·Y ]
@@ -1233,11 +1262,7 @@ class PulseGates:
         # Pack: [envelope_params..., w] - evolution time is the last element
         # of pulse_params (pulse_params[-1]).
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        # Use jnp.concatenate over Python list-splat to keep the trace graph
-        # compact (no per-element unpacking + restack).
-        env_params = jnp.concatenate(
-            [jnp.ravel(pulse_params[:-1]), jnp.ravel(jnp.asarray(w))]
-        )
+        env_params = _pack_params(pulse_params, slice(None, -1), w)
         # Both terms share the same parameter array.
         H_eff.evolve(name="RX")([env_params, env_params], t)
         UnitaryGates.Noise(wires, noise_params)
@@ -1263,7 +1288,7 @@ class PulseGates:
         pulse_params = PulseInformation.RY.split_params(pulse_params)
 
         PulseGates._record_pulse_event("RY", w, wires, pulse_params)
-        t = pulse_params[-1]
+        t = _duration(pulse_params)
 
         # See NOTE in RX: same proper interaction-picture form, with
         # carrier phase ϕ = +π/2 so the slow RWA component drives +Y.
@@ -1274,9 +1299,7 @@ class PulseGates:
         # Pack w into the params so the coefficient function doesn't need
         # a closure - this enables JIT solver cache sharing across all RY calls.
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        env_params = jnp.concatenate(
-            [jnp.ravel(pulse_params[:-1]), jnp.ravel(jnp.asarray(w))]
-        )
+        env_params = _pack_params(pulse_params, slice(None, -1), w)
         H_eff.evolve(name="RY")([env_params, env_params], t)
         UnitaryGates.Noise(wires, noise_params)
 
@@ -1317,11 +1340,7 @@ class PulseGates:
         # pulse_params may be a 1-element array or scalar; ravel + slice the first
         # element to preserve the original semantics, then concatenate with w.
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        pp_flat = jnp.ravel(jnp.asarray(pulse_params))
-        H_eff.evolve(name="RZ")(
-            [jnp.concatenate([pp_flat[:1], jnp.ravel(jnp.asarray(w))])],
-            1,
-        )
+        H_eff.evolve(name="RZ")([_pack_params(pulse_params, slice(None, 1), w)], 1)
 
         UnitaryGates.Noise(wires, noise_params)
 
@@ -1360,7 +1379,14 @@ class PulseGates:
             pulse_params: Optional pulse parameters (split across children).
         """
         pp_obj = PulseInformation.gate_by_name(gate_name)
-        parts = pp_obj.split_params(pulse_params)
+        # Without explicit parameters every child uses its own defaults.
+        # Splitting the composite's concatenated defaults here instead would
+        # turn them into tracers inside a jit, hiding identical gates from
+        # :func:`~jaqsi.evolution.resolve_pending`.
+        if pulse_params is None:
+            parts = [None] * len(pp_obj.decomposition)
+        else:
+            parts = pp_obj.split_params(pulse_params)
 
         for step, child_params in zip(pp_obj.decomposition, parts):
             child_wires = PulseGates._resolve_wires(step.wire_fn, wires)

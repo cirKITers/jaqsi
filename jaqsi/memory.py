@@ -151,16 +151,24 @@ def estimate_peak_bytes(
 
 
 def available_memory_bytes() -> int:
-    """Return available system memory in bytes.
+    """Return available memory in bytes on the default JAX device.
 
-    Uses ``psutil.virtual_memory().available`` for cross-platform
-    support (Linux, macOS, Windows).  Falls back to reading
-    ``/proc/meminfo`` on Linux, and finally to a conservative 4 GiB
-    default if neither approach succeeds.
+    On an accelerator (GPU) this is the unused part of the allocator limit
+    reported by ``memory_stats()`` (JAX preallocates 75 % of VRAM by
+    default).  On CPU ``memory_stats()`` is ``None`` and the host RAM is
+    used instead: ``psutil.virtual_memory().available`` for cross-platform
+    support (Linux, macOS, Windows), falling back to ``/proc/meminfo`` on
+    Linux and finally to a conservative 4 GiB default.
 
     Returns:
         Available memory in bytes.
     """
+    stats = jax.devices()[0].memory_stats()
+    if stats and "bytes_limit" in stats:
+        mem = stats["bytes_limit"] - stats.get("bytes_in_use", 0)
+        log.debug(f"Available device memory: {mem / 1024**3:.1f} GB")
+        return mem
+
     mem = 4 * 1024**3
     # Primary: psutil (works on Linux, macOS, Windows)
     try:

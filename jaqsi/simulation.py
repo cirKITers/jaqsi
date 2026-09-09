@@ -7,12 +7,14 @@ static methods on ``Script``) makes the simulation engine independently testable
 and keeps ``script.py`` focused on orchestration.
 """
 
-from typing import List, Optional
+import itertools
+from typing import List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np  # needed to prevent jitting some operations
 
+from jaqsi.evolution import resolve_pending
 from jaqsi.operations import (
     Operation,
     _einsum_subscript,
@@ -64,6 +66,50 @@ def _stack_obs(obs: List[Operation], n_qubits: int) -> jnp.ndarray:
     return jnp.stack([ob.lifted_matrix(n_qubits) for ob in obs], axis=0)
 
 
+def _apply_gate(
+    psi: jnp.ndarray, gate: jnp.ndarray, wires: Tuple[int, ...]
+) -> jnp.ndarray:
+    """Apply a k-qubit gate to a rank-n state tensor along *wires*.
+
+    Each output slice along the gate wires is a linear combination of the
+    ``2**k`` input slices, which XLA compiles into one fused elementwise loop
+    over the state.  The equivalent ``einsum`` lowers to a transpose of the
+    whole state plus a dot with a ``2**k``-wide contraction per gate; on CPU
+    that is bandwidth-bound and about twice as slow for one- and two-qubit
+    gates.  Wider gates keep the ``einsum`` path, where the contraction is
+    large enough to amortise the transpose.
+
+    Args:
+        psi: State tensor of shape ``(2,) * n``.
+        gate: Gate tensor of shape ``(2,) * 2k`` (see ``Operation._gate_tensor``).
+        wires: The k axes of *psi* the gate acts on.
+
+    Returns:
+        Updated state tensor of shape ``(2,) * n``.
+    """
+    k = len(wires)
+    if k > 2:
+        return jnp.einsum(_einsum_subscript(psi.ndim, k, wires), gate, psi)
+
+    g = gate.reshape(2**k, 2**k)
+    parts = []
+    for bits in itertools.product((0, 1), repeat=k):
+        index: List[Union[int, slice]] = [slice(None)] * psi.ndim
+        for w, b in zip(wires, bits):
+            index[w] = b
+        parts.append(psi[tuple(index)])
+
+    outs = []
+    for i in range(2**k):
+        acc = g[i, 0] * parts[0]
+        for j in range(1, 2**k):
+            acc = acc + g[i, j] * parts[j]
+        outs.append(acc)
+
+    out = jnp.stack(outs).reshape((2,) * k + parts[0].shape)
+    return jnp.moveaxis(out, tuple(range(k)), wires)
+
+
 def simulate_pure(
     tape: List[Operation],
     n_qubits: int,
@@ -77,10 +123,10 @@ def simulate_pure(
     only the initial and final conversions to/from the flat ``(2**n,)``
     representation incur a reshape.
 
-    All gate tensors and einsum subscript strings are pre-extracted from
-    the tape before the simulation loop so that each iteration performs
-    only a single ``jnp.einsum`` call with zero additional Python
-    overhead (no method dispatch, no property access, no cache lookup).
+    All gate tensors and wire tuples are pre-extracted from the tape before
+    the simulation loop so that each iteration performs only a single
+    :func:`_apply_gate` call with zero additional Python overhead (no method
+    dispatch, no property access, no cache lookup).
 
     Args:
         tape: Ordered list of gate operations to apply.
@@ -93,25 +139,21 @@ def simulate_pure(
     """
     dim = 2**n_qubits
 
-    # Pre-extract gate tensors and einsum subscripts — eliminates all
-    # per-gate Python overhead (method calls, property lookups, cache
-    # hits on _einsum_subscript) from the hot loop.
-    compiled = []
-    for op in tape:
-        if isinstance(op, Barrier):
-            continue
-        k = len(op.wires)
-        gt = op._gate_tensor(k)
-        sub = _einsum_subscript(n_qubits, k, tuple(op.wires))
-        compiled.append((gt, sub))
+    # Pre-extract gate tensors and wires — eliminates all per-gate Python
+    # overhead (method calls, property lookups) from the hot loop.
+    compiled = [
+        (op._gate_tensor(len(op.wires)), tuple(op.wires))
+        for op in tape
+        if not isinstance(op, Barrier)
+    ]
 
     if initial_state is None:
         state = jnp.zeros(dim, dtype=cdtype()).at[0].set(1.0)
     else:
         state = jnp.asarray(initial_state, dtype=cdtype()).reshape(dim)
     psi = state.reshape((2,) * n_qubits)
-    for gt, sub in compiled:
-        psi = jnp.einsum(sub, gt, psi)
+    for gt, wires in compiled:
+        psi = _apply_gate(psi, gt, wires)
     return psi.reshape(dim)
 
 
@@ -198,6 +240,9 @@ def simulate_and_measure(
     Returns:
         Measurement result (shape depends on *type*).
     """
+    # Solve all pulse-level gates of the tape in batches before simulating.
+    resolve_pending(tape)
+
     if use_density:
         # Check if any operation is actually a noise channel.
         has_noise = any(isinstance(o, KrausChannel) for o in tape)

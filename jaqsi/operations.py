@@ -86,7 +86,6 @@ def _contract_and_restore(
     return jnp.einsum(subscript, gate, tensor)
 
 
-
 def _embed_matrix(
     mat: jnp.ndarray,
     op_wires: list,
@@ -154,7 +153,6 @@ def _permute_matrix(mat: jnp.ndarray, perm: list, n_qubits: int) -> jnp.ndarray:
     col_perm = [p + n_qubits for p in perm]
     tensor = jnp.transpose(tensor, row_perm + col_perm)
     return tensor.reshape(dim, dim)
-
 
 
 class Operation:
@@ -349,7 +347,7 @@ class Operation:
         Returns:
             A new :class:`Operation` with matrix ``U\\dagger`` acting on the same wires.
         """
-        mat = jnp.conj(self._matrix).T
+        mat = jnp.conj(self.matrix).T
         op = Operation(wires=self.wires, matrix=mat, record=False)
 
         self._update_tape_operation(op)
@@ -366,7 +364,7 @@ class Operation:
             A new :class:`Operation` with matrix ``U\\dagger`` acting on the same wires.
         """
         # TODO: support fractional powers
-        mat = jnp.linalg.matrix_power(self._matrix, power)
+        mat = jnp.linalg.matrix_power(self.matrix, power)
         op = Operation(wires=self.wires, matrix=mat, record=False)
 
         self._update_tape_operation(op)
@@ -388,7 +386,7 @@ class Operation:
         if isinstance(other, Operation):
             return self.__matmul__(other)
 
-        mat = other * self._matrix
+        mat = other * self.matrix
         op = Operation(wires=self.wires, matrix=mat, record=False)
 
         self._update_tape_operation(op)
@@ -591,7 +589,6 @@ class Operation:
         return rho_t.reshape(2**n_qubits, 2**n_qubits)
 
 
-
 class Hermitian(Operation):
     """A generic Hermitian observable or gate defined by an arbitrary matrix.
 
@@ -619,6 +616,14 @@ class Hermitian(Operation):
             matrix=jnp.asarray(matrix, dtype=cdtype()),
             record=record,
         )
+        # A concrete matrix is kept in numpy for the pulse solver: inside
+        # a jit trace every jnp value is a tracer, and only concrete values let
+        # :func:`~jaqsi.evolution.resolve_pending` recognise identical gates.
+        self._np_matrix = (
+            None
+            if isinstance(matrix, jax.core.Tracer)
+            else np.asarray(matrix, dtype=complex)
+        )
 
     def __rmul__(self, coeff_fn: Callable) -> "ParametrizedHamiltonian":
         """Support ``coeff_fn * Hermitian`` -> :class:`ParametrizedHamiltonian`.
@@ -638,7 +643,8 @@ class Hermitian(Operation):
             raise TypeError(
                 f"Left operand of `* Hermitian` must be callable, got {type(coeff_fn)}"
             )
-        return ParametrizedHamiltonian(terms=[(coeff_fn, self.matrix, self.wires)])
+        H = self.matrix if self._np_matrix is None else self._np_matrix
+        return ParametrizedHamiltonian(terms=[(coeff_fn, H, self.wires)])
 
     def evolve(self, name: Optional[str] = None, **odeint_kwargs) -> Callable:
         """Return a gate factory for static evolution ``U = exp(-i t H)``.
@@ -724,16 +730,22 @@ class ParametrizedHamiltonian:
                 )
 
         # Validate matrix shape compatibility across terms.
-        first_dim = jnp.asarray(terms[0][1]).shape
+        first_dim = jnp.shape(terms[0][1])
         for _, H, _ in terms[1:]:
-            if jnp.asarray(H).shape != first_dim:
+            if jnp.shape(H) != first_dim:
                 raise ValueError(
                     f"All term matrices must have the same shape; got "
-                    f"{jnp.asarray(H).shape} vs. {first_dim}."
+                    f"{jnp.shape(H)} vs. {first_dim}."
                 )
 
+        # Concrete matrices stay in numpy (see :class:`Hermitian`).
+        def _as_matrix(H):
+            if isinstance(H, jax.core.Tracer):
+                return jnp.asarray(H, dtype=cdtype())
+            return np.asarray(H, dtype=complex)
+
         self._terms: Tuple[Tuple[Callable, jnp.ndarray, List[int]], ...] = tuple(
-            (fn, jnp.asarray(H, dtype=cdtype()), _wlist(w)) for fn, H, w in terms
+            (fn, _as_matrix(H), _wlist(w)) for fn, H, w in terms
         )
         self.wires: List[int] = list(first_wires)
 

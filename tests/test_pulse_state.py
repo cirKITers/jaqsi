@@ -111,3 +111,82 @@ def test_set_envelope_evicts_stale_solver_cache():
     assert jnp.isclose(fidelity, 1.0, atol=1e-2), (
         f"Stale solver cache contaminated fidelity: {fidelity}"
     )
+
+
+def test_pulse_gates_are_solved_in_one_batch_per_shape():
+    """All RX pulse gates of a tape share one vmapped solve; CZ gets its own."""
+    from jaqsi import evolution, simulation
+
+    def circuit(w):
+        for q in range(4):
+            PulseGates.RX(w * (q + 1) / 4, wires=q)
+        PulseGates.CZ(wires=[0, 1])
+
+    script = Script(circuit, n_qubits=4)
+    w = jnp.pi / 3
+
+    assert evolution.resolve_pending(script.record(w)) == [4, 1]
+
+    batched = script.execute(type="state", args=(w,))
+    # Unresolved tape: every gate solves itself on first ``.matrix`` access.
+    lazy = simulation.simulate_pure(script.record(w), 4)
+    assert jnp.allclose(batched, lazy, atol=1e-10)
+
+
+def test_host_offload_matches_and_reraises():
+    """Host-offloaded solves give the same results and still raise on failure."""
+    from jaqsi.gateset import PauliZ
+
+    def circuit(w):
+        PulseGates.RX(w, wires=0)
+        PulseGates.RY(w / 2, wires=1)
+        PulseGates.CZ(wires=[0, 1])
+
+    script = Script(circuit, n_qubits=2)
+    ws = jnp.linspace(0.1, 1.5, 4)
+
+    def expval(w):
+        return script.execute(type="expval", obs=[PauliZ(wires=0)], args=(w,))[0]
+
+    ref_state = script.execute(type="state", args=(ws,), in_axes=(0,))
+    ref_grad = jax.grad(expval)(ws[0])
+
+    prev = Evolution.set_solver_defaults(host_offload=True)
+    try:
+        state = script.execute(type="state", args=(ws,), in_axes=(0,))
+        grad = jax.grad(expval)(ws[0])
+        assert jnp.allclose(state, ref_state, atol=1e-10)
+        assert jnp.allclose(grad, ref_grad, atol=1e-8)
+
+        prev_steps = Evolution.set_solver_defaults(max_steps=4)
+        try:
+            with pytest.raises(RuntimeError):
+                Script(circuit, n_qubits=2).execute(type="state", args=(ws[0],))
+        finally:
+            Evolution.set_solver_defaults(**prev_steps)
+    finally:
+        Evolution.set_solver_defaults(**prev)
+
+
+def test_identical_pulse_gates_are_solved_once():
+    """Repeated fixed-angle gates share one solve, also inside a jit trace."""
+    from jaqsi import evolution
+
+    def circuit(w):
+        for q in range(4):
+            PulseGates.RX(jnp.pi / 2, wires=q)
+        PulseGates.CZ(wires=[0, 1])
+        PulseGates.CZ(wires=[2, 3])
+
+    script = Script(circuit, n_qubits=4)
+    assert evolution.resolve_pending(script.record(0.0)) == [1, 1]
+
+    seen = []
+
+    @jax.jit
+    def traced(w):
+        seen.append(evolution.resolve_pending(script.record(w)))
+        return w
+
+    traced(0.0)
+    assert seen == [[1, 1]]

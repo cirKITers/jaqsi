@@ -42,6 +42,10 @@ Homepage = "https://cirkiters.github.io/jaqsi/"
 Repository = "https://github.com/cirKITers/jaqsi"
 Documentation = "https://cirkiters.github.io/jaqsi/"
 
+[project.optional-dependencies]
+cuda12 = ["jax[cuda12]>=0.9.0.1"]
+cuda13 = ["jax[cuda13]>=0.9.0.1"]
+
 [dependency-groups]
 dev = [
     "black>=25.12.0",
