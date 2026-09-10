@@ -8,6 +8,8 @@ and keeps ``script.py`` focused on orchestration.
 """
 
 import itertools
+import string
+from functools import lru_cache
 from typing import List, Optional, Tuple, Union
 
 import jax
@@ -69,7 +71,7 @@ def _stack_obs(obs: List[Operation], n_qubits: int) -> jnp.ndarray:
 def _apply_gate(
     psi: jnp.ndarray, gate: jnp.ndarray, wires: Tuple[int, ...]
 ) -> jnp.ndarray:
-    """Apply a k-qubit gate to a rank-n state tensor along *wires*.
+    """Apply a k-qubit gate matrix to a rank-n state tensor along *wires*.
 
     Each output slice along the gate wires is a linear combination of the
     ``2**k`` input slices, which XLA compiles into one fused elementwise loop
@@ -81,7 +83,7 @@ def _apply_gate(
 
     Args:
         psi: State tensor of shape ``(2,) * n``.
-        gate: Gate tensor of shape ``(2,) * 2k`` (see ``Operation._gate_tensor``).
+        gate: Gate matrix of shape ``(2**k, 2**k)``.
         wires: The k axes of *psi* the gate acts on.
 
     Returns:
@@ -89,9 +91,10 @@ def _apply_gate(
     """
     k = len(wires)
     if k > 2:
+        gate = gate.reshape((2,) * 2 * k)
         return jnp.einsum(_einsum_subscript(psi.ndim, k, wires), gate, psi)
 
-    g = gate.reshape(2**k, 2**k)
+    g = gate
     parts = []
     for bits in itertools.product((0, 1), repeat=k):
         index: List[Union[int, slice]] = [slice(None)] * psi.ndim
@@ -110,6 +113,58 @@ def _apply_gate(
     return jnp.moveaxis(out, tuple(range(k)), wires)
 
 
+Gate = Tuple[jnp.ndarray, Tuple[int, ...]]
+
+
+def _fuse(gates: List[Gate]) -> List[Gate]:
+    """Merge runs of gates on identical wires into single matrices.
+
+    A gate is multiplied into the previous gate on the same wire tuple when no
+    gate in between touches any of those wires (gates on disjoint wires
+    commute).  Each fused block then costs one pass over the state instead of
+    one per gate.  The small matrix products are part of the trace, so
+    differentiation through the block parameters is unchanged.
+
+    Args:
+        gates: ``(matrix, wires)`` pairs in tape order.
+
+    Returns:
+        Fused ``(matrix, wires)`` pairs in tape order.
+    """
+    fused: List[list] = []
+    last: dict = {}  # wire -> index in ``fused`` of the last block touching it
+    for mat, wires in gates:
+        i = last.get(wires[0])
+        if i is not None and fused[i][1] == wires and all(last[w] == i for w in wires):
+            fused[i][0] = mat @ fused[i][0]
+            continue
+        fused.append([mat, wires])
+        for w in wires:
+            last[w] = len(fused) - 1
+    return [(mat, wires) for mat, wires in fused]
+
+
+def _compile(tape: List[Operation]) -> List[Gate]:
+    """Pre-extract ``(matrix, wires)`` per gate and fuse neighbours."""
+    gates = [(op.matrix, tuple(op.wires)) for op in tape if not isinstance(op, Barrier)]
+    return _fuse(gates)
+
+
+def _initial_state(dim: int, initial_state: Optional[jnp.ndarray]) -> jnp.ndarray:
+    """Flat statevector |00…0⟩, or *initial_state* cast to the working dtype."""
+    if initial_state is None:
+        return jnp.zeros(dim, dtype=cdtype()).at[0].set(1.0)
+    return jnp.asarray(initial_state, dtype=cdtype()).reshape(dim)
+
+
+def _run(gates: List[Gate], state: jnp.ndarray, n_qubits: int) -> jnp.ndarray:
+    """Apply compiled *gates* to a flat statevector, keeping tensor form inside."""
+    psi = state.reshape((2,) * n_qubits)
+    for gate, wires in gates:
+        psi = _apply_gate(psi, gate, wires)
+    return psi.reshape(2**n_qubits)
+
+
 def simulate_pure(
     tape: List[Operation],
     n_qubits: int,
@@ -123,10 +178,9 @@ def simulate_pure(
     only the initial and final conversions to/from the flat ``(2**n,)``
     representation incur a reshape.
 
-    All gate tensors and wire tuples are pre-extracted from the tape before
-    the simulation loop so that each iteration performs only a single
-    :func:`_apply_gate` call with zero additional Python overhead (no method
-    dispatch, no property access, no cache lookup).
+    Gate matrices and wire tuples are pre-extracted from the tape and
+    neighbouring gates on identical wires are fused (see :func:`_compile`), so
+    each loop iteration is a single :func:`_apply_gate` call.
 
     Args:
         tape: Ordered list of gate operations to apply.
@@ -137,24 +191,8 @@ def simulate_pure(
     Returns:
         Statevector of shape ``(2**n_qubits,)``.
     """
-    dim = 2**n_qubits
-
-    # Pre-extract gate tensors and wires — eliminates all per-gate Python
-    # overhead (method calls, property lookups) from the hot loop.
-    compiled = [
-        (op._gate_tensor(len(op.wires)), tuple(op.wires))
-        for op in tape
-        if not isinstance(op, Barrier)
-    ]
-
-    if initial_state is None:
-        state = jnp.zeros(dim, dtype=cdtype()).at[0].set(1.0)
-    else:
-        state = jnp.asarray(initial_state, dtype=cdtype()).reshape(dim)
-    psi = state.reshape((2,) * n_qubits)
-    for gt, wires in compiled:
-        psi = _apply_gate(psi, gt, wires)
-    return psi.reshape(dim)
+    state = _initial_state(2**n_qubits, initial_state)
+    return _run(_compile(tape), state, n_qubits)
 
 
 def simulate_mixed(
@@ -192,6 +230,112 @@ def simulate_mixed(
     return rho
 
 
+@lru_cache(maxsize=256)
+def _outer_subscript(n: int, wires: Tuple[int, ...]) -> str:
+    """``einsum`` subscript contracting two rank-n tensors over all axes but *wires*.
+
+    ``_outer_subscript(3, (1,))`` gives ``"adc,aec->de"``; the result
+    ``M[o, i] = sum_rest lam[o, rest] * psi[i, rest]`` is the cotangent of a
+    gate matrix on *wires* in JAX's transpose convention (no conjugation).
+    """
+    letters = string.ascii_letters
+    k = len(wires)
+    lam_idx, psi_idx = list(letters[:n]), list(letters[:n])
+    for j, w in enumerate(wires):
+        lam_idx[w], psi_idx[w] = letters[n + j], letters[n + k + j]
+    return f"{''.join(lam_idx)},{''.join(psi_idx)}->{letters[n : n + 2 * k]}"
+
+
+def _forward_mode(leaves) -> bool:
+    """Whether a forward-mode (``jvp``) trace reaches any of *leaves*.
+
+    ``jax.custom_vjp`` has no forward-mode rule, so the adjoint path must be
+    skipped under ``jax.jvp``/``jax.jacfwd``.  Reverse mode (``jax.grad``,
+    ``jax.jacrev``) traces with ``LinearizeTracer`` since direct linearization
+    became JAX's default, forward mode with ``JVPTracer``.  Walking a leaf's
+    tracer chain from the innermost transform outwards, the first of the two
+    decides; batch and jit tracers are transparent.  A misclassification only
+    costs the fast path, never correctness.  Tracers of a transform applied
+    outside an enclosing ``jax.jit`` are not visible here.
+    """
+    for leaf in leaves:
+        while isinstance(leaf, jax.core.Tracer):
+            kind = type(leaf).__name__
+            if kind == "JVPTracer":
+                return True
+            if kind == "LinearizeTracer":
+                break
+            leaf = getattr(leaf, "primal", getattr(leaf, "val", None))
+    return False
+
+
+def _use_adjoint(tape: List[Operation], gates: List[Gate], initial_state) -> bool:
+    """Whether the adjoint VJP applies: every gate unitary, no forward-mode trace."""
+    unitary = all(op.is_unitary for op in tape if not isinstance(op, Barrier))
+    return unitary and not _forward_mode([m for m, _ in gates] + [initial_state])
+
+
+def _adjoint_expval(
+    gates: List[Gate], n_qubits: int, obs: List[Operation], state: jnp.ndarray
+) -> jnp.ndarray:
+    """Expectation values of a pure circuit with an adjoint-method VJP.
+
+    The forward pass is the plain gate loop.  The backward pass reads no tape
+    of intermediate states: it walks the gates in reverse, undoing each with
+    ``U^dagger`` on the state while propagating the cotangent with ``U^T``, so
+    gradient memory stays at a few statevectors regardless of depth.  The
+    cotangents are those of the gate *matrices* (and of the initial state);
+    JAX chains them into the gate parameters through the matrix construction,
+    so no per-gate generator is needed.  Constant matrices get a zero
+    cotangent without the contraction.
+
+    Args:
+        gates: Fused ``(matrix, wires)`` pairs from :func:`_compile`.
+        n_qubits: Total number of qubits.
+        obs: Observables for the expectation values.
+        state: Initial flat statevector of shape ``(2**n_qubits,)``.
+
+    Returns:
+        Expectation values of shape ``(len(obs),)``.
+    """
+    dim = 2**n_qubits
+    shape = (2,) * n_qubits
+    wires = [w for _, w in gates]
+    const = [not isinstance(m, jax.core.Tracer) for m, _ in gates]
+
+    def run(mats, psi0):
+        return _run(list(zip(mats, wires)), psi0, n_qubits)
+
+    def measure(psi):
+        return measure_state(psi, n_qubits, "expval", obs)
+
+    @jax.custom_vjp
+    def expval(mats, psi0):
+        return measure(run(mats, psi0))
+
+    def fwd(mats, psi0):
+        psi = run(mats, psi0)
+        return measure(psi), (mats, psi)
+
+    def bwd(res, ct):
+        mats, psi = res
+        lam = jax.vjp(measure, psi)[1](ct)[0].reshape(shape)
+        psi = psi.reshape(shape)
+        mats_bar = []
+        for mat, w, is_const in zip(reversed(mats), reversed(wires), reversed(const)):
+            psi = _apply_gate(psi, jnp.conj(mat).T, w)
+            if is_const:
+                mats_bar.append(jnp.zeros_like(mat))
+            else:
+                outer = jnp.einsum(_outer_subscript(n_qubits, w), lam, psi)
+                mats_bar.append(outer.reshape(mat.shape))
+            lam = _apply_gate(lam, mat.T, w)
+        return mats_bar[::-1], lam.reshape(dim)
+
+    expval.defvjp(fwd, bwd)
+    return expval([m for m, _ in gates], state)
+
+
 def simulate_and_measure(
     tape: List[Operation],
     n_qubits: int,
@@ -201,6 +345,7 @@ def simulate_and_measure(
     shots: Optional[int] = None,
     key: Optional[jnp.ndarray] = None,
     initial_state: Optional[jnp.ndarray] = None,
+    adjoint: bool = True,
 ) -> jnp.ndarray:
     """Run simulation and measurement in a single dispatch.
 
@@ -223,6 +368,12 @@ def simulate_and_measure(
     O(2^n), giving a significant speed-up for medium qubit counts
     (~4x for 5 qubits).
 
+    Gradients — for exact ``"expval"`` results of a pure circuit whose gates
+    are all unitary, the expectation values carry an adjoint-method VJP (see
+    :func:`_adjoint_expval`) instead of relying on JAX taping every
+    intermediate state.  Every other case, and forward-mode differentiation,
+    uses plain JAX autodiff.
+
     Args:
         tape: Ordered list of gate/channel operations to apply.
         n_qubits: Total number of qubits.
@@ -236,6 +387,9 @@ def simulate_and_measure(
             is not ``None``.
         initial_state: Optional statevector of shape ``(2**n_qubits,)`` to start
             from.  When ``None`` (default), the all-zero state |00…0⟩ is used.
+        adjoint: Allow the adjoint VJP.  :class:`~jaqsi.script.Script` passes
+            ``False`` when it detects a forward-mode trace on the arguments
+            outside its own ``jit``, where :func:`_forward_mode` cannot see it.
 
     Returns:
         Measurement result (shape depends on *type*).
@@ -263,7 +417,12 @@ def simulate_and_measure(
             return sample_shots(exact_probs, n_qubits, type, obs, shots, key)
         return measure_density(rho, n_qubits, type, obs)
 
-    state = simulate_pure(tape, n_qubits, initial_state=initial_state)
+    gates = _compile(tape)
+    state = _initial_state(2**n_qubits, initial_state)
+    exact_expval = type == "expval" and shots is None
+    if exact_expval and adjoint and _use_adjoint(tape, gates, initial_state):
+        return _adjoint_expval(gates, n_qubits, obs, state)
+    state = _run(gates, state, n_qubits)
 
     if shots is not None and type in ("probs", "expval"):
         exact_probs = jnp.abs(state) ** 2
