@@ -306,6 +306,7 @@ class Script:
         kwargs: dict,
         in_axes: Tuple,
         has_initial_state: bool = False,
+        adjoint: bool = True,
     ) -> _BatchPlan:
         """Trace the circuit once and build the cacheable execution plan.
 
@@ -320,7 +321,7 @@ class Script:
         When *has_initial_state* is ``True`` the last entry of *args* is the
         (vmapped) initial statevector rather than a circuit argument; it is
         stripped before recording the tape and forwarded to
-        :func:`~jaqsi.simulation.simulate_and_measure`.
+        :func:`~jaqsi.simulation.simulate_and_measure`, as is *adjoint*.
         """
         scalar_args = tuple(
             self._slice_first(a, ax) if ax is not None else a
@@ -343,7 +344,13 @@ class Script:
                 circuit_args, init_state = single_args, None
             single_tape = self.record(*circuit_args, **kwargs)
             return simulation.simulate_and_measure(
-                single_tape, n_qubits, type, obs, use_density, initial_state=init_state
+                single_tape,
+                n_qubits,
+                type,
+                obs,
+                use_density,
+                initial_state=init_state,
+                adjoint=adjoint,
             )
 
         # Wrapping the vmapped function in eqx.filter_jit: (1) treats non-array
@@ -522,6 +529,12 @@ class Script:
         # cached and reused (see exact-mode dispatch below); only the AOT
         # ``plain_fn`` executable is gated off, as it cannot accept tracers.
         in_transform = self._args_contain_tracer(eff_args)
+        # The plan's ``jit`` hides outer tracers from the simulation kernel, so
+        # forward-mode differentiation (no adjoint VJP) is detected here and
+        # baked into the plan.
+        forward_mode = simulation._forward_mode(
+            jax.tree_util.tree_leaves((eff_args, kwargs))
+        )
 
         # ``a.__class__`` (not ``type(a)``: ``type`` is shadowed by the
         # measurement-type parameter) keys non-array statics by their class.
@@ -624,6 +637,7 @@ class Script:
             gate_error,
             solver_defaults,
             has_init,
+            forward_mode,
             fingerprint,
         )
 
@@ -637,7 +651,13 @@ class Script:
         plan = self._jit_cache.get(cache_key)
         if plan is None:
             plan = self._build_plan(
-                type, obs, eff_args, kwargs, eff_in_axes, has_initial_state=has_init
+                type,
+                obs,
+                eff_args,
+                kwargs,
+                eff_in_axes,
+                has_initial_state=has_init,
+                adjoint=not forward_mode,
             )
             self._jit_cache[cache_key] = plan
 
