@@ -3,7 +3,7 @@
 Everything in JAQSI is built on JAX, so a circuit executed through a `Script` is an
 ordinary differentiable function.
 That means training needs no special machinery: take a gradient with `jax.grad` (or
-`jax.value_and_grad`), hand it to an optimiser such as [Optax](https://optax.readthedocs.io/),
+`jax.value_and_grad`), hand it to an optimizer such as [Optax](https://optax.readthedocs.io/),
 and wrap the update in `jax.jit`.
 
 ## A minimal training loop
@@ -36,7 +36,7 @@ def cost(params):
     return script.execute(type="expval", obs=obs, args=(params,))[0]
 ```
 
-The optimisation itself is plain Optax.
+The optimization itself is plain Optax.
 Note that the whole step is `jit`-compiled: the circuit is traced once and the compiled
 program is reused for every epoch.
 
@@ -92,15 +92,15 @@ def mse(weights):
     return jnp.mean((predict(weights) - ys) ** 2)
 ```
 
-`mse` is then optimised with exactly the same `step` function as above.
+`mse` is then optimized with exactly the same `step` function as above.
 For large batches `Script` also chunks the `vmap` automatically so that the peak memory
 stays within what is available (see `memory.py`).
 
 ## Training pulse parameters
 
 The same loop works one level lower, on the pulse parameters that define a gate.
-This is the idea behind [quantum optimal control](pulses.md#quantum-optimal-control-qoc):
-express a gate at the pulse level, then optimise its pulse parameters so that the
+This is the idea behind [quantum optimal control](pulses.md#quantum_optimal_control):
+express a gate at the pulse level, then optimize its pulse parameters so that the
 resulting evolution reproduces a target unitary.
 
 The cost is an infidelity between the pulse-level state and the ideal gate's state:
@@ -134,7 +134,7 @@ def infidelity(pulse_params):
 ```
 
 Gradients flow through the ODE solver that integrates the pulse Hamiltonian, so the
-optimisation is again a standard Optax loop.
+optimization is again a standard Optax loop.
 Starting from deliberately detuned parameters, it recovers the gate:
 
 ```python
@@ -164,4 +164,4 @@ qoc.optimize_all(sel_gates=["RX"], make_log=False)
 ```
 
 See the [pulses](pulses.md) page for the cost-function registry and the available
-envelopes, and the [references](references.md#quantum-optimal-control) for the full `QOC` API.
+envelopes, and the [references](references.md#quantum_optimal_control) for the full `QOC` API.

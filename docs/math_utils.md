@@ -12,7 +12,7 @@ The Quantum Fisher Information (QFI) is the metric tensor of the state manifold 
 Because it depends on the derivatives of the state with respect to the parameters, it is computed from the state as a **function** of the parameters rather than from a single state.
 The Jacobian is obtained via forward-mode automatic differentiation, which yields the complex Jacobian directly for the real-valued circuit parameters.
 
-For a pure, normalised state $\ket{\psi(\theta)}$ the QFI is the Fubini-Study metric (scaled by four):
+For a pure, normalized state $\ket{\psi(\theta)}$ the QFI is the Fubini-Study metric (scaled by four):
 
 \[F_{ij} = 4\,\mathrm{Re}\left[\braket{\partial_i\psi | \partial_j\psi} - \braket{\partial_i\psi | \psi}\braket{\psi | \partial_j\psi}\right]\]
 
@@ -42,7 +42,7 @@ metric = fubini_study_metric(state_fn, theta)
 ```
 
 The result is a real, symmetric $(P, P)$ matrix, where $P$ is the total number of parameters (the parameter axes are flattened).
-The state returned by the callable is assumed to be normalised, which the simulator guarantees.
+The state returned by the callable is assumed to be normalized, which the simulator guarantees.
 
 Any function mapping parameters to a state vector works, so a higher-level model wrapping a
 `Script` can be passed just as well, closing over any data inputs
