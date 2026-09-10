@@ -96,6 +96,15 @@ def mse(weights):
 For large batches `Script` also chunks the `vmap` automatically so that the peak memory
 stays within what is available (see `memory.py`).
 
+## How gradients are computed
+
+For expectation values of noise-free circuits, `Script` differentiates with the adjoint method instead of letting JAX tape every intermediate state.
+Here, the backward pass walks the circuit in reverse and undoes each gate with its inverse, so the memory a gradient needs stays at a few statevectors no matter how deep the circuit is.
+The result is identical to plain autodiff.
+The method needs unitary gates and expectation values, so `Script` falls back to standard reverse-mode autodiff for noisy circuits, shot-based, state or probability outputs, and gates that are not unitary.
+Forward-mode differentiation (`jax.jvp`, `jax.jacfwd`) falls back as well.
+This is detected on the arguments of `execute`, so it keep any `jax.jit` outside the forward-mode transform.
+
 ## Training pulse parameters
 
 The same loop works one level lower, on the pulse parameters that define a gate.
