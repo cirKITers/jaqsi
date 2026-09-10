@@ -44,15 +44,14 @@ class _BatchPlan(NamedTuple):
             when no concrete-array fast path applies (non-array argument, shot
             mode, or running under a transform).
         n_qubits: Qubit count derived from the recorded tape.
-        use_density: Whether density-matrix simulation is required.
-        n_ops: Number of operations on the tape (for memory estimation).
+        use_density: Whether the tape carries a noise channel and hence
+            density-matrix simulation is required.
     """
 
     batched_fn: Callable
     plain_fn: Optional[Callable]
     n_qubits: int
     use_density: bool
-    n_ops: int
 
 
 class Script:
@@ -234,7 +233,7 @@ class Script:
             tape = self.record(*args, **kwargs)
             n_qubits = self._n_qubits or simulation.infer_n_qubits(tape, obs)
 
-            use_density = simulation.uses_density(tape, type)
+            use_density = simulation.has_noise(tape)
 
             return simulation.simulate_and_measure(
                 tape,
@@ -283,7 +282,7 @@ class Script:
 
     def _record_metadata(
         self, scalar_args: tuple, kwargs: dict, obs: List[Operation], type: str
-    ) -> Tuple[int, bool, int]:
+    ) -> Tuple[int, bool]:
         """Trace the tape from scalar slices to derive batch-invariant metadata.
 
         Recording once with scalar slices determines ``n_qubits`` and whether
@@ -291,12 +290,11 @@ class Script:
         running the full batch.
 
         Returns:
-            ``(n_qubits, use_density, n_ops)``.
+            ``(n_qubits, use_density)``.
         """
         tape = self.record(*scalar_args, **kwargs)
         n_qubits = self._n_qubits or simulation.infer_n_qubits(tape, obs)
-        use_density = simulation.uses_density(tape, type)
-        return n_qubits, use_density, len(tape)
+        return n_qubits, simulation.has_noise(tape)
 
     def _build_plan(
         self,
@@ -329,9 +327,7 @@ class Script:
         )
         # The trailing scalar is the initial state, not a circuit argument.
         record_args = scalar_args[:-1] if has_initial_state else scalar_args
-        n_qubits, use_density, n_ops = self._record_metadata(
-            record_args, kwargs, obs, type
-        )
+        n_qubits, use_density = self._record_metadata(record_args, kwargs, obs, type)
 
         # Re-recording inside this closure is necessary: tape operations may
         # have matrices that depend on the batched argument (e.g. RX(theta)
@@ -374,7 +370,7 @@ class Script:
         if all(hasattr(a, "shape") for a in args):
             plain_fn = jax.jit(jax.vmap(_single_execute, in_axes=in_axes))
 
-        return _BatchPlan(batched_fn, plain_fn, n_qubits, use_density, n_ops)
+        return _BatchPlan(batched_fn, plain_fn, n_qubits, use_density)
 
     def _chunk_size(
         self,
@@ -393,12 +389,7 @@ class Script:
         chunk_size = self._jit_cache.get(mem_key)
         if chunk_size is None:
             chunk_size = memory.compute_chunk_size(
-                plan.n_qubits,
-                batch_size,
-                type,
-                plan.use_density,
-                n_obs,
-                n_ops=plan.n_ops,
+                plan.n_qubits, batch_size, type, plan.use_density, n_obs
             )
             self._jit_cache[mem_key] = chunk_size
         return chunk_size
@@ -579,7 +570,7 @@ class Script:
                     self._slice_first(a, ax) if ax is not None else a
                     for a, ax in zip(args, in_axes)
                 )
-                n_qubits, use_density, n_ops = self._record_metadata(
+                n_qubits, use_density = self._record_metadata(
                     scalar_args, kwargs, obs, type
                 )
 
@@ -608,7 +599,7 @@ class Script:
                 batched_fn = eqx.filter_jit(
                     jax.vmap(_single_execute_shots, in_axes=shot_in_axes)
                 )
-                plan = _BatchPlan(batched_fn, None, n_qubits, use_density, n_ops)
+                plan = _BatchPlan(batched_fn, None, n_qubits, use_density)
                 self._jit_cache[shot_cache_key] = plan
 
             chunk_size = self._chunk_size(

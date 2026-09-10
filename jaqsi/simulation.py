@@ -45,22 +45,20 @@ def infer_n_qubits(ops: List[Operation], obs: List[Operation]) -> int:
     return max(all_wires) + 1 if all_wires else 1
 
 
-def uses_density(tape: List[Operation], type: str) -> bool:
-    """Return whether density-matrix simulation is required.
+def has_noise(tape: List[Operation]) -> bool:
+    """Return whether *tape* contains a noise channel.
 
-    Density-matrix simulation is needed when the caller explicitly requests the
-    ``"density"`` measurement type, or when the tape contains a noise channel
-    (a :class:`~jaqsi.noise.KrausChannel`).
+    Density-matrix simulation is required exactly in that case; a
+    ``"density"`` output of a noise-free circuit is formed from the
+    statevector by :func:`measure_state`.
 
     Args:
         tape: Ordered list of gate/channel operations.
-        type: Requested measurement type.
 
     Returns:
-        ``True`` if density-matrix simulation must be used.
+        ``True`` if any operation is a :class:`~jaqsi.noise.KrausChannel`.
     """
-    has_noise = any(isinstance(op, KrausChannel) for op in tape)
-    return type == "density" or has_noise
+    return any(isinstance(op, KrausChannel) for op in tape)
 
 
 def _stack_obs(obs: List[Operation], n_qubits: int) -> jnp.ndarray:
@@ -350,23 +348,18 @@ def simulate_and_measure(
     """Run simulation and measurement in a single dispatch.
 
     Chooses statevector or density-matrix simulation based on
-    *use_density*, then applies the appropriate measurement function.
-    This eliminates duplicated branching logic in single-sample and
-    batched execution paths.
+    *use_density* (a noise channel on the tape), then applies the
+    appropriate measurement function.  This eliminates duplicated branching
+    logic in single-sample and batched execution paths.
 
     When *shots* is not ``None``, the exact probability distribution is
     first computed, then ``shots`` samples are drawn from it to produce
     a noisy estimate of the requested measurement (``"probs"`` or
     ``"expval"``).
 
-    Pure-circuit density optimisation — when ``type == "density"``
-    but no noise channels are present on the tape, the density matrix
-    is computed via statevector simulation followed by an outer product
-    ``\\rho  = \\vert\\psi\\rangle\\langle\\psi\\vert``
-    instead of evolving the full ``2^n\\times 2^n`` matrix
-    gate by gate.  This reduces the per-gate cost from O(4^n) to
-    O(2^n), giving a significant speed-up for medium qubit counts
-    (~4x for 5 qubits).
+    A ``"density"`` output of a noise-free circuit is the outer product of
+    the simulated statevector (see :func:`measure_state`), so the full
+    ``2^n x 2^n`` matrix is never evolved gate by gate for it.
 
     Gradients — for exact ``"expval"`` results of a pure circuit whose gates
     are all unitary, the expectation values carry an adjoint-method VJP (see
@@ -380,7 +373,8 @@ def simulate_and_measure(
         type: Measurement type (``"state"``/``"probs"``/``"expval"``/
             ``"density"``).
         obs: Observables for ``"expval"`` measurements.
-        use_density: If ``True``, use density-matrix simulation.
+        use_density: If ``True``, use density-matrix simulation (the tape
+            carries a noise channel).
         shots: Number of measurement shots.  If ``None`` (default),
             exact analytic results are returned.
         key: JAX PRNG key for shot sampling.  Required when *shots*
@@ -398,20 +392,7 @@ def simulate_and_measure(
     resolve_pending(tape)
 
     if use_density:
-        # Check if any operation is actually a noise channel.
-        has_noise = any(isinstance(o, KrausChannel) for o in tape)
-        if has_noise:
-            # Must do full density-matrix evolution for Kraus channels.
-            rho = simulate_mixed(tape, n_qubits, initial_state=initial_state)
-        else:
-            # Pure circuit requesting density output: simulate the
-            # statevector (O(depth\times 2^n)) and form  # noqa: W605
-            # \rho  = \vert\psi\rangle\langle\psi\vert once  # noqa: W605
-            # (O(4^n)).  This avoids the O(depth\times 4^n) cost of  # noqa: W605
-            # evolving the full density matrix gate by gate.
-            state = simulate_pure(tape, n_qubits, initial_state=initial_state)
-            rho = jnp.outer(state, jnp.conj(state))
-
+        rho = simulate_mixed(tape, n_qubits, initial_state=initial_state)
         if shots is not None and type in ("probs", "expval"):
             exact_probs = jnp.real(jnp.diag(rho))
             return sample_shots(exact_probs, n_qubits, type, obs, shots, key)
@@ -442,15 +423,17 @@ def measure_state(
         state: Statevector of shape ``(2**n_qubits,)``.
         n_qubits: Total number of qubits.
         type: Measurement type — one of ``"state"``, ``"probs"``,
-            or ``"expval"``.
+            ``"density"`` or ``"expval"``.
         obs: Observables used when *type* is ``"expval"``.
 
     Returns:
         Measurement result whose shape depends on *type*:
 
-        - ``"state"``  -> ``(2**n_qubits,)``
-        - ``"probs"``  -> ``(2**n_qubits,)``
-        - ``"expval"`` -> ``(len(obs),)``
+        - ``"state"``   -> ``(2**n_qubits,)``
+        - ``"probs"``   -> ``(2**n_qubits,)``
+        - ``"density"`` -> ``(2**n_qubits, 2**n_qubits)``, the outer product
+          ``|psi><psi|``
+        - ``"expval"``  -> ``(len(obs),)``
 
     Raises:
         ValueError: If *type* is not a recognised measurement type.
@@ -460,6 +443,9 @@ def measure_state(
 
     if type == "probs":
         return jnp.abs(state) ** 2
+
+    if type == "density":
+        return jnp.outer(state, jnp.conj(state))
 
     if type == "expval":
         # Fast path for single-qubit diagonal observables (PauliZ, etc.)
