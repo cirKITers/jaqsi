@@ -148,6 +148,42 @@ def _compile(tape: List[Operation]) -> List[Gate]:
     return _fuse(gates)
 
 
+def _compile_mixed(tape: List[Operation], n_qubits: int) -> List[Gate]:
+    """Pre-extract superoperators on the density tensor's axes and fuse them.
+
+    The density matrix is treated as a rank-``2n`` tensor with ket axes
+    ``0..n-1`` and bra axes ``n..2n-1``.  A gate on up to two qubits becomes
+    the superoperator ``U (x) U*`` on its ket and bra axes, a channel becomes
+    ``sum_k K_k (x) K_k*``, so gates and channels are the same kind of entry
+    and :func:`_fuse` merges them alike: one pass over the density tensor per
+    block instead of two per gate and two per Kraus operator.  Wider gates
+    stay two-sided (``U`` on the ket axes, ``U*`` on the bra axes), since their
+    superoperator would be ``4**k`` square.
+
+    Args:
+        tape: Ordered list of gate/channel operations.
+        n_qubits: Total number of qubits.
+
+    Returns:
+        Fused ``(matrix, axes)`` pairs for :func:`_run` on the rank-``2n`` tensor.
+    """
+    gates: List[Gate] = []
+    for op in tape:
+        if isinstance(op, Barrier):
+            continue
+        ket = tuple(op.wires)
+        bra = tuple(w + n_qubits for w in op.wires)
+        if isinstance(op, KrausChannel):
+            superop = sum(jnp.kron(K, jnp.conj(K)) for K in op.kraus_matrices())
+            gates.append((superop, ket + bra))
+        elif len(ket) <= 2:
+            gates.append((jnp.kron(op.matrix, jnp.conj(op.matrix)), ket + bra))
+        else:
+            gates.append((op.matrix, ket))
+            gates.append((jnp.conj(op.matrix), bra))
+    return _fuse(gates)
+
+
 def _initial_state(dim: int, initial_state: Optional[jnp.ndarray]) -> jnp.ndarray:
     """Flat statevector |00…0⟩, or *initial_state* cast to the working dtype."""
     if initial_state is None:
@@ -156,7 +192,11 @@ def _initial_state(dim: int, initial_state: Optional[jnp.ndarray]) -> jnp.ndarra
 
 
 def _run(gates: List[Gate], state: jnp.ndarray, n_qubits: int) -> jnp.ndarray:
-    """Apply compiled *gates* to a flat statevector, keeping tensor form inside."""
+    """Apply compiled *gates* to a flat array of ``n_qubits`` binary axes.
+
+    Density-matrix simulation passes the flattened ``(dim, dim)`` matrix with
+    ``2 * n_qubits`` axes; the gates then address ket and bra axes alike.
+    """
     psi = state.reshape((2,) * n_qubits)
     for gate, wires in gates:
         psi = _apply_gate(psi, gate, wires)
@@ -202,11 +242,10 @@ def simulate_mixed(
 
     Starts from \\rho  = \\vert 0\\rangle\\langle 0\\vert (or from
     \\rho  = \\vert\\psi\\rangle\\langle\\psi\\vert for a given *initial_state*
-    \\vert\\psi\\rangle) and applies each gate in *tape* via
-    :meth:`~jaqsi.operations.Operation.apply_to_density`
-    (\\rho  -> U\\rho U† for unitaries, \\Sigma_k K_k \\rho  K_k\\dagger
-    for Kraus channels).
-    Required for noisy circuits.
+    \\vert\\psi\\rangle) and applies the fused superoperators of *tape*
+    (see :func:`_compile_mixed`) to the density matrix kept as a rank-``2n``
+    tensor: \\rho  -> U\\rho U† for unitaries, \\Sigma_k K_k \\rho  K_k\\dagger
+    for Kraus channels.  Required for noisy circuits.
 
     Args:
         tape: Ordered list of gate or channel operations to apply.
@@ -223,9 +262,8 @@ def simulate_mixed(
     else:
         psi = jnp.asarray(initial_state, dtype=cdtype()).reshape(dim)
         rho = jnp.outer(psi, jnp.conj(psi))
-    for op in tape:
-        rho = op.apply_to_density(rho, n_qubits)
-    return rho
+    gates = _compile_mixed(tape, n_qubits)
+    return _run(gates, rho.reshape(dim * dim), 2 * n_qubits).reshape(dim, dim)
 
 
 @lru_cache(maxsize=256)

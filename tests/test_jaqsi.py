@@ -720,6 +720,47 @@ class TestNoise:
         assert purity <= 1.0 + 1e-10, f"purity {purity} > 1"
         assert purity < 1.0 - 1e-6, f"purity {purity} ≈ 1: channel had no effect?"
 
+    @staticmethod
+    def _noisy_circuit(theta):
+        for q in range(3):
+            H(wires=q)
+        RZ(theta, wires=0)
+        DepolarizingChannel(0.05, wires=0)
+        RX(theta / 2, wires=0)
+        BitFlip(0.1, wires=0)
+        CX(wires=[1, 2])
+        CX(wires=[1, 2])
+        CCX(wires=[0, 1, 2])
+        RY(theta, wires=2)
+        AmplitudeDamping(0.2, wires=2)
+
+    @pytest.mark.unittest
+    def test_mixed_kernel_matches_gate_by_gate(self) -> None:
+        """Fused superoperators reproduce op-by-op density evolution."""
+        tape = Script(self._noisy_circuit, n_qubits=3).record(0.7)
+        rho = simulation.simulate_mixed(tape, 3)
+        ref = jnp.zeros((8, 8), dtype=jnp.complex128).at[0, 0].set(1.0)
+        for op in tape:
+            ref = op.apply_to_density(ref, 3)
+        assert jnp.allclose(rho, ref, atol=1e-12)
+
+    @pytest.mark.unittest
+    def test_mixed_kernel_fuses_gates_and_channels(self) -> None:
+        """Gates and channels on one wire merge; the Toffoli stays two-sided."""
+        tape = Script(self._noisy_circuit, n_qubits=3).record(0.7)
+        blocks = simulation._compile_mixed(tape, 3)
+        # wire 0: H, RZ, channel, RX, channel -> 1; wire 1: H -> 1; wire 2: H -> 1;
+        # CX, CX -> 1; CCX -> ket and bra entries; wire 2: RY, damping -> 1.
+        assert [w for _, w in blocks] == [
+            (0, 3),
+            (1, 4),
+            (2, 5),
+            (1, 2, 4, 5),
+            (0, 1, 2),
+            (3, 4, 5),
+            (2, 5),
+        ]
+
 
 class TestBatch:
     @pytest.mark.unittest
