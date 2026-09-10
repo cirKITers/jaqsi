@@ -42,7 +42,7 @@ Each gate draws its own error, independently of the other gates in the circuit.
 Because `GateError` is stochastic, a `random_key` must be passed alongside it.
 
 It's important to note that, depending on the flag set in `UnitaryGates.batch_gate_error`, the error of a given gate will be applied to the entire batch of parameters (all batch elements are affected in the same way) or drawn for each batch element individually (default).
-This can be particularly usefull in a scenario where one would like to apply noise e.g. only on a subset of the gates but wants to change them all uniformly.
+This can be particularly useful in a scenario where one would like to apply noise e.g. only on a subset of the gates but wants to change them all uniformly.
 An example of this is provided in the following code:
 
 ```python

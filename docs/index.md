@@ -27,7 +27,7 @@ pip install "jaqsi[cuda13]" # or cuda12 depending on your hardware
 
 JAX then runs on the GPU by default; set `JAX_PLATFORMS=cpu` to force the CPU.
 
-Once you have set things up, go ahead and checkout [how to use JAQSI](usage.md).
+Once you have set things up, go ahead and check out [how to use JAQSI](usage.md).
 
 ```python
 import jaqsi
@@ -44,11 +44,11 @@ script.execute(type="expval", obs=[jaqsi.PauliZ(wires=0)], args=(theta,))
 `Gates` is the entry point for applying gates: it records them on the circuit tape, attaches
 any noise you ask for, and runs them as ideal unitaries or, with `pulse=True`, as real pulses.
 
-Beyond gate-level simulation, JAQSI can simulate circuits at the [pulse level](pulses.md) and tune pulse parameters with [quantum optimal control](references.md#quantum-optimal-control).
+Beyond gate-level simulation, JAQSI can simulate circuits at the [pulse level](pulses.md) and tune pulse parameters with [quantum optimal control](references.md#quantum_optimal_control).
 
 If you are looking for quantum Fourier model tooling built on top of this simulator (ansaetze, expressibility, entangling capability and Fourier analysis), see [qml-essentials](https://github.com/cirKITers/qml-essentials).
 
-If you want to contribute, please refer to our [CONTRIBUTING guide](https://github.com/cirKITers/jaqsi/blob/main/CONTRIBUTING.md) on Github.
+If you want to contribute, please refer to our [CONTRIBUTING guide](https://github.com/cirKITers/jaqsi/blob/main/CONTRIBUTING.md) on GitHub.
 
 Do you want to use our software in a research project? :books:
-Please checkout the [github repository](https://github.com/cirKITers/jaqsi) and follow the instructions ("Cite this repository") there.
+Please check out the [GitHub repository](https://github.com/cirKITers/jaqsi) and follow the instructions ("Cite this repository") there.
