@@ -54,7 +54,7 @@ from jaqsi.gates import (
     PulseInformation,
     PulseGates,
 )
-from jaqsi import memory
+from jaqsi import memory, simulation
 
 import logging
 
@@ -1763,7 +1763,53 @@ class TestMemory:
         assert est8 > est4 * 10
 
 
+@pytest.mark.unittest
+def test_pure_density_output_is_outer_product() -> None:
+    """A noise-free circuit with a density output never evolves a density matrix."""
+
+    def circuit(theta):
+        H(wires=0)
+        CRX(theta, wires=[0, 1])
+
+    script = Script(circuit, n_qubits=2)
+    state = script.execute(type="state", args=(0.4,))
+    rho = script.execute(type="density", args=(0.4,))
+    assert jnp.allclose(rho, jnp.outer(state, jnp.conj(state)), atol=1e-12)
+    assert not simulation.has_noise(script.record(0.4))
+
+
 class TestChunk:
+    @pytest.mark.unittest
+    def test_pure_density_output_is_not_chunked(self, monkeypatch) -> None:
+        """A noise-free circuit with a density output simulates a statevector.
+
+        The chunk-size estimate must not assume density-matrix evolution for
+        it: 10 qubits with a batch of 10 needs about 250 MB, so nothing may be
+        chunked with 4 GB available.
+        """
+        n_qubits = 10
+
+        def circuit(theta):
+            for i in range(n_qubits):
+                H(wires=i)
+            RX(theta, wires=0)
+
+        calls = []
+        chunked = memory.execute_chunked
+
+        def spy(*args, **kwargs):
+            calls.append(1)
+            return chunked(*args, **kwargs)
+
+        monkeypatch.setattr(memory, "available_memory_bytes", lambda: 4 * 1024**3)
+        monkeypatch.setattr(memory, "execute_chunked", spy)
+        thetas = jnp.linspace(0, jnp.pi, 10)
+        rho = Script(circuit, n_qubits=n_qubits).execute(
+            type="density", args=(thetas,), in_axes=(0,)
+        )
+        assert rho.shape == (10, 2**n_qubits, 2**n_qubits)
+        assert not calls
+
     @pytest.mark.unittest
     @pytest.mark.limit_memory("1 GB")
     def test_memory_chunked_stays_bounded(self) -> None:
@@ -1855,56 +1901,21 @@ class TestChunk:
         assert chunk >= 1
 
     @pytest.mark.unittest
-    def test_estimate_peak_bytes_scales_with_n_ops(self):
-        """Gate-temporary contribution must scale linearly with n_ops."""
-        # With a single gate the estimate must equal the legacy value.
-        legacy = memory.estimate_peak_bytes(6, 100, "state", False, 0)
-        same = memory.estimate_peak_bytes(6, 100, "state", False, 0, n_ops=1)
-        assert legacy == same
+    def test_estimate_peak_bytes_constants(self):
+        """The estimate is a fixed number of batched buffers, not per gate.
 
-        # Adding more gates must monotonically increase the estimate.
-        est_30 = memory.estimate_peak_bytes(6, 100, "state", False, 0, n_ops=30)
-        assert est_30 > same
-        # Roughly: gate_tmp dominates over sv for n_ops >> 1, so we expect
-        # a ~n_ops-fold increase in the gate_tmp contribution.
-        # The exact ratio depends on sv/output overhead — bound loosely.
-        assert est_30 >= same * 10
-
-    @pytest.mark.unittest
-    def test_compute_chunk_size_triggers_with_many_ops(self, monkeypatch):
-        """A deep circuit on a large batch must chunk even when the
-        single-gate estimate fits in available memory.
-
-        This regression test pins the OOM scenario from
-        ``tests_external/oom.py``: with the legacy n_ops=1 estimate the
-        full batch fits in ~0.6 GB and chunking is skipped; with the
-        n_ops-aware estimate, chunking must trigger.
+        XLA's compiled peak scratch is depth-independent: eight batched
+        statevectors cover the adjoint gradient of an expectation value, five
+        batched density matrices cover noisy simulation.  A density output of
+        a pure circuit is dominated by the output itself.
         """
-        # Pretend we have 7 GB available (typical desktop free RAM).
-        monkeypatch.setattr(memory, "available_memory_bytes", lambda: 7 * 1024**3)
-        # 6 qubits, B = 209498 (matches the FCC/golomb reproducer),
-        # expval with 6 single-qubit observables, ~30 ops on the tape.
-        chunk_legacy = memory.compute_chunk_size(
-            n_qubits=6,
-            batch_size=209498,
-            type="expval",
-            use_density=False,
-            n_obs=6,
-            n_ops=1,
-        )
-        chunk_real = memory.compute_chunk_size(
-            n_qubits=6,
-            batch_size=209498,
-            type="expval",
-            use_density=False,
-            n_obs=6,
-            n_ops=30,
-        )
-        # With n_ops=1 the estimate fits and chunking is skipped.
-        assert chunk_legacy == 209498
-        # With n_ops=30 chunking *must* be engaged.
-        assert chunk_real < 209498
-        assert chunk_real >= 1
+        elem = 16  # complex128, x64 is enabled in this module
+        sv = memory.estimate_peak_bytes(10, 10, "expval", False, n_obs=10)
+        assert sv == int(1.5 * 8 * 10 * 2**10 * elem)
+        rho = memory.estimate_peak_bytes(8, 10, "expval", True, n_obs=8)
+        assert rho == int(1.5 * 5 * 10 * 2**16 * elem)
+        out = memory.estimate_peak_bytes(10, 10, "density", False)
+        assert out == int(1.5 * 10 * 2**20 * elem)
 
     @staticmethod
     def _chunked_circuit_expval(theta):
