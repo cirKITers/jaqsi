@@ -57,24 +57,25 @@ def estimate_peak_bytes(
     type: str,
     use_density: bool,
     n_obs: int = 0,
-    n_ops: int = 1,
 ) -> int:
     """Estimate peak memory (bytes) for a batched simulation.
 
-    The estimate accounts for:
+    The estimate is the larger of the simulation scratch and the returned
+    output tensor.  The scratch is a fixed number of batched buffers,
+    independent of circuit depth, taken from XLA's compiled peak (CPU, JAX
+    0.11): a forward statevector run needs two ``(B, dim)`` buffers and the
+    adjoint gradient of an expectation value eight, so eight are budgeted;
+    density-matrix simulation needs five ``(B, dim, dim)`` buffers.
 
-    - The batched statevector (always needed, even for density).
-    - The batched output tensor (state / probs / density / expval).
-    - Gate-tensor temporaries (the einsum buffers).  XLA frequently
-      keeps several per-gate ``(B, dim)`` (or ``(B, dim, dim)`` for
-      density) buffers alive simultaneously when fusion is not
-      possible, so we multiply the per-element gate cost by *n_ops*
-      (the number of operations on the recorded tape).
+    Gradients taken with a tape (noisy circuits, state or probability
+    outputs) hold about one buffer per gate, but chunking cannot bound them:
+    reverse mode keeps every chunk's residuals until the backward pass runs.
+    They are therefore not part of the estimate.
 
     Observable matrices are **not** counted: they are computed inside
     the JIT-compiled function and XLA manages their lifetime (reusing
     buffers between observables).  Similarly, the outer-product
-    temporary for pure-circuit density mode is transient within XLA.
+    temporary for a density output of a pure circuit is transient within XLA.
 
     Element size is determined dynamically from ``jax.config.x64_enabled``:
     when x64 mode is disabled (the JAX default), complex values are
@@ -92,11 +93,9 @@ def estimate_peak_bytes(
         batch_size: Number of batch elements.
         type: Measurement type (``"state"``, ``"probs"``, ``"expval"``,
             ``"density"``).
-        use_density: Whether density-matrix simulation is used.
+        use_density: Whether density-matrix simulation is used (the tape
+            carries a noise channel).
         n_obs: Number of observables (relevant for ``"expval"``).
-        n_ops: Number of operations on the circuit tape.  Used to
-            scale the per-gate intermediate buffers.  Defaults to 1
-            (backwards-compatible single-buffer estimate).
 
     Returns:
         Estimated peak memory in bytes.
@@ -106,48 +105,18 @@ def estimate_peak_bytes(
     # to complex64 when x64 mode is disabled (the default).
     elem, real_elem = _element_sizes()
 
-    # Clamp n_ops to at least 1 so callers that omit the argument
-    # reproduce the previous behaviour.
-    n_ops = max(int(n_ops), 1)
-
-    # Statevector: always allocated during simulation
-    sv_bytes = batch_size * dim * elem
-
-    # Simulation intermediate: when density-matrix simulation is used,
-    # the full rho (dim × dim) must be held during gate evolution —
-    # even if the final output is only probs or expval.
-    # apply_to_density contracts both U and U* against rho, so at least
-    # two intermediate (dim × dim) buffers are alive simultaneously
-    # *per applied operation*.
     if use_density:
-        sim_bytes = 2 * n_ops * batch_size * dim * dim * elem
+        sim_bytes = 5 * batch_size * dim * dim * elem
     else:
-        sim_bytes = 0  # statevector is already counted above
+        sim_bytes = 8 * batch_size * dim * elem
 
-    # Output tensor: this is the *returned* array, not the simulation
-    # intermediate.  For probs/expval with density simulation the
-    # density matrix is reduced to a small output *before* returning,
-    # so only the reduced output coexists with the next chunk.
+    # Output tensor: the *returned* array.  For probs/expval with density
+    # simulation the density matrix is reduced to a small output before
+    # returning, so only the reduced output coexists with the next chunk.
     out_bytes = _output_bytes(type, batch_size, dim, elem, real_elem, n_obs)
 
-    # Gate temporaries: einsum creates a ``(B, dim)`` (statevector) or
-    # ``(B, dim, dim)`` (density) buffer per gate, and XLA cannot
-    # always free them between consecutive ops, so scale by ``n_ops``.
-    if use_density:
-        gate_tmp = n_ops * batch_size * dim * dim * elem
-    else:
-        gate_tmp = n_ops * batch_size * dim * elem
-
-    # Peak = max(simulation phase, output phase).  During simulation
-    # the intermediate + statevector + gate temps are alive.  After
-    # measurement, only the output survives.  So peak is whichever
-    # phase is larger.
-    sim_peak = sv_bytes + sim_bytes + gate_tmp
-    out_peak = out_bytes
-    raw = max(sim_peak, out_peak)
-
-    # 1.5× safety factor for XLA compiler temporaries, padding, etc.
-    return int(raw * 1.5)
+    # 1.5x safety factor for XLA compiler temporaries, padding, etc.
+    return int(max(sim_bytes, out_bytes) * 1.5)
 
 
 def available_memory_bytes() -> int:
@@ -198,7 +167,6 @@ def compute_chunk_size(
     use_density: bool,
     n_obs: int = 0,
     memory_fraction: float = 0.8,
-    n_ops: int = 1,
 ) -> int:
     """Determine the largest chunk size that fits in available memory.
 
@@ -222,16 +190,12 @@ def compute_chunk_size(
         n_obs: Number of observables.
         memory_fraction: Fraction of available memory to target
             (default 0.8 = 80%).
-        n_ops: Number of operations on the recorded tape.  Forwarded
-            to :func:`estimate_peak_bytes`.  Defaults to 1.
 
     Returns:
         Chunk size (number of batch elements per sub-batch).
     """
     avail = int(available_memory_bytes() * memory_fraction)
-    full_est = estimate_peak_bytes(
-        n_qubits, batch_size, type, use_density, n_obs, n_ops=n_ops
-    )
+    full_est = estimate_peak_bytes(n_qubits, batch_size, type, use_density, n_obs)
 
     if full_est <= avail:
         return batch_size  # everything fits — no chunking
@@ -245,7 +209,7 @@ def compute_chunk_size(
     avail_for_chunks = max(avail - accum_bytes, elem)  # at least 1 element
 
     # Per-element cost: the memory for computing a single batch element.
-    per_elem = estimate_peak_bytes(n_qubits, 1, type, use_density, n_obs, n_ops=n_ops)
+    per_elem = estimate_peak_bytes(n_qubits, 1, type, use_density, n_obs)
 
     if per_elem <= 0:
         return batch_size
