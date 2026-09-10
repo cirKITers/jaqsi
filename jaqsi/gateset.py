@@ -30,6 +30,7 @@ class Id(Operation):
 
     _matrix = jnp.eye(2, dtype=cdtype())
     _num_wires = None  # accept any number of wires
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -52,6 +53,7 @@ class PauliX(Operation):
 
     _matrix = jnp.array([[0, 1], [1, 0]], dtype=cdtype())
     _num_wires = 1
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -68,6 +70,7 @@ class PauliY(Operation):
 
     _matrix = jnp.array([[0, -1j], [1j, 0]], dtype=cdtype())
     _num_wires = 1
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -84,6 +87,7 @@ class PauliZ(Operation):
 
     _matrix = jnp.array([[1, 0], [0, -1]], dtype=cdtype())
     _num_wires = 1
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -100,6 +104,7 @@ class H(Operation):
 
     _matrix = jnp.array([[1, 1], [1, -1]], dtype=cdtype()) / jnp.sqrt(2)
     _num_wires = 1
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -120,6 +125,7 @@ class S(Operation):
 
     _matrix = jnp.array([[1, 0], [0, 1j]], dtype=cdtype())
     _num_wires = 1
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0) -> None:
@@ -138,6 +144,7 @@ class SWAP(Operation):
         [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=cdtype()
     )
     _num_wires = 2
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -203,6 +210,7 @@ class DiagonalQubitUnitary(Operation):
     # Do NOT list "diag" in _param_names — the array is not a scalar
     # parameter and would break drawing helpers that call float(p).
     _param_names = ()
+    is_unitary = True
 
     def __init__(
         self,
@@ -401,6 +409,7 @@ def _make_rotation_gate(pauli_class: type, name: str) -> type:
             f"exp(-i \\theta/2 {name[1]}).\n"
         )
         _num_wires = 1
+        is_unitary = True
         _param_names = ("theta",)
 
         def __init__(
@@ -452,6 +461,7 @@ def _make_controlled_gate(target_class: type, name: str) -> type:
         )
         _matrix = jnp.kron(_P0, Id._matrix) + jnp.kron(_P1, target_mat)
         _num_wires = 2
+        is_unitary = True
         is_controlled = True
         is_clifford = True  # CX, CY, CZ are all Clifford gates
 
@@ -503,6 +513,7 @@ class CCX(Operation):
     )
     is_controlled = True
     _num_wires = 3
+    is_unitary = True
 
     def __init__(self, wires: List[int] = [0, 1, 2], **kwargs) -> None:
         """Initialise a Toffoli (CCX) gate.
@@ -537,6 +548,7 @@ class CSWAP(Operation):
     )
     is_controlled = True
     _num_wires = 3
+    is_unitary = True
 
     def __init__(self, wires: List[int] = [0, 1, 2], **kwargs) -> None:
         """Initialise a Controlled-SWAP (Fredkin) gate.
@@ -564,6 +576,7 @@ class ControlledPhaseShift(Operation):
     """
 
     _num_wires = 2
+    is_unitary = True
     _param_names = ("phi",)
     is_controlled = True
 
@@ -589,6 +602,7 @@ class Rot(Operation):
     """
 
     _num_wires = 1
+    is_unitary = True
     _param_names = ("phi", "theta", "omega")
 
     def __init__(
@@ -641,6 +655,7 @@ class PauliRot(Operation):
     """
 
     _param_names = ("theta",)
+    is_unitary = True
 
     # Map from character to 2x2 matrix (canonical single source of truth)
     _PAULI_MAP = _PAULI_MATRICES
@@ -734,6 +749,7 @@ class ControlledPauliRot(Operation):
     """
 
     _param_names = ("theta",)
+    is_unitary = True
     is_controlled = True
 
     def __init__(
