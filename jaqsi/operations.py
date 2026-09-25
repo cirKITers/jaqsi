@@ -7,7 +7,7 @@ time-evolution sources.  The concrete gate library lives in
 symbolic Pauli/Clifford layer in :mod:`jaqsi.paulis`.
 """
 
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, NamedTuple, Optional, Tuple, Union
 from functools import lru_cache
 import string
 import numpy as np
@@ -155,6 +155,18 @@ def _permute_matrix(mat: jnp.ndarray, perm: list, n_qubits: int) -> jnp.ndarray:
     return tensor.reshape(dim, dim)
 
 
+class GateStructure(NamedTuple):
+    """Static matrix guarantees; permutations map output rows to input columns.
+
+    Controls are leading wires, active only when all are one. An empty
+    descriptor makes no guarantees and uses the dense application kernel.
+    """
+
+    permutation: Tuple[int, ...] = ()
+    diagonal: bool = False
+    controls: int = 0
+
+
 class Operation:
     """Base class for any quantum operation or observable.
 
@@ -184,6 +196,7 @@ class Operation:
     # Subclasses should set this to the gate's unitary / matrix
     # Whether this is a controlled operation
     is_controlled = False
+    _structure = GateStructure()
     # Whether this gate is a Clifford gate (normalises the Pauli group
     is_clifford = False
     # Whether the matrix is unitary (see the class docstring)
@@ -231,6 +244,7 @@ class Operation:
 
         if matrix is not None:
             self._matrix = matrix
+            self._structure = GateStructure()
 
         # If a tape is currently recording, append ourselves
         if record:
@@ -356,6 +370,11 @@ class Operation:
         mat = jnp.conj(self.matrix).T
         op = Operation(wires=self.wires, matrix=mat, record=False)
         op.is_unitary = self.is_unitary
+        structure = self._structure
+        permutation = structure.permutation
+        if permutation:
+            permutation = tuple(permutation.index(i) for i in range(len(permutation)))
+        op._structure = structure._replace(permutation=permutation)
 
         self._update_tape_operation(op)
 
