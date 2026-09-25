@@ -502,15 +502,19 @@ def measure_state(
         all_single_qubit_diag = all(_is_single_qubit_diag(ob) for ob in obs)
 
         if all_single_qubit_diag:
-            probs = jnp.abs(state) ** 2
-            psi_t = probs.reshape((2,) * n_qubits)
+            probs = jnp.real(state) ** 2 + jnp.imag(state) ** 2
+            indices = jnp.arange(state.size)
             results = []
             for ob in obs:
                 q = ob.wires[0]
                 d = np.real(np.diag(np.asarray(ob.__class__._matrix)))
-                # Sum probabilities over all axes except qubit q
-                p_q = jnp.sum(psi_t, axis=tuple(i for i in range(n_qubits) if i != q))
-                results.append(d[0] * p_q[0] + d[1] * p_q[1])
+                # Qubit 0 is the most significant bit. A flat weighted sum
+                # avoids the layout changes of one marginal reduction per wire.
+                bit = (indices >> (n_qubits - q - 1)) & 1
+                weights = jnp.where(bit, d[1], d[0])
+                results.append(
+                    jnp.dot(probs, weights, precision=jax.lax.Precision.HIGHEST)
+                )
             return jnp.array(results)
 
         # General path: stack observable matrices and use a single
