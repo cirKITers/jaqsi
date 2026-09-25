@@ -10,7 +10,7 @@ and keeps ``script.py`` focused on orchestration.
 import itertools
 import string
 from functools import lru_cache
-from typing import List, Optional, Tuple, Union
+from typing import List, NamedTuple, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -19,6 +19,7 @@ import numpy as np  # needed to prevent jitting some operations
 from jaqsi.evolution import resolve_pending
 from jaqsi.operations import (
     Operation,
+    GateStructure,
     _einsum_subscript,
     cdtype,
 )
@@ -111,7 +112,63 @@ def _apply_gate(
     return jnp.moveaxis(out, tuple(range(k)), wires)
 
 
-Gate = Tuple[jnp.ndarray, Tuple[int, ...]]
+class Gate(NamedTuple):
+    """A matrix and its static application metadata."""
+
+    matrix: jnp.ndarray
+    wires: Tuple[int, ...]
+    structure: GateStructure = GateStructure()
+
+
+def _apply_structured(
+    psi: jnp.ndarray,
+    gate: jnp.ndarray,
+    wires: Tuple[int, ...],
+    structure: GateStructure,
+) -> jnp.ndarray:
+    """Apply guaranteed structure without inspecting traced matrix values."""
+    k = len(wires)
+    if structure.permutation:
+        parts = []
+        for column in structure.permutation:
+            index: List[Union[int, slice]] = [slice(None)] * psi.ndim
+            for i, w in enumerate(wires):
+                index[w] = (column >> (k - 1 - i)) & 1
+            parts.append(psi[tuple(index)])
+        out = jnp.stack(parts).reshape((2,) * k + parts[0].shape)
+        return jnp.moveaxis(out, tuple(range(k)), wires)
+    if structure.diagonal:
+        diagonal = jnp.diag(gate).reshape((2,) * k + (1,) * (psi.ndim - k))
+        return psi * jnp.moveaxis(diagonal, tuple(range(k)), wires)
+    if structure.controls:
+        control = wires[0]
+        index: List[Union[int, slice]] = [slice(None)] * psi.ndim
+        index[control] = 0
+        inactive = psi[tuple(index)]
+        index[control] = 1
+        active = psi[tuple(index)]
+        remaining = tuple(w - (w > control) for w in wires[1:])
+        half = gate.shape[0] // 2
+        active = _apply_structured(
+            active,
+            gate[half:, half:],
+            remaining,
+            structure._replace(controls=structure.controls - 1),
+        )
+        return jnp.stack((inactive, active), axis=control)
+    return _apply_gate(psi, gate, wires)
+
+
+def _fused_structure(left: GateStructure, right: GateStructure) -> GateStructure:
+    """Guarantees retained by the product right @ left on identical wires."""
+    permutation = ()
+    if left.permutation and right.permutation:
+        permutation = tuple(left.permutation[i] for i in right.permutation)
+    return GateStructure(
+        permutation=permutation,
+        diagonal=left.diagonal and right.diagonal,
+        controls=min(left.controls, right.controls),
+    )
 
 
 def _fuse(gates: List[Gate]) -> List[Gate]:
@@ -124,27 +181,32 @@ def _fuse(gates: List[Gate]) -> List[Gate]:
     differentiation through the block parameters is unchanged.
 
     Args:
-        gates: ``(matrix, wires)`` pairs in tape order.
+        gates: Compiled gates in tape order.
 
     Returns:
-        Fused ``(matrix, wires)`` pairs in tape order.
+        Fused gates in tape order.
     """
     fused: List[list] = []
     last: dict = {}  # wire -> index in ``fused`` of the last block touching it
-    for mat, wires in gates:
+    for mat, wires, structure in gates:
         i = last.get(wires[0])
         if i is not None and fused[i][1] == wires and all(last[w] == i for w in wires):
             fused[i][0] = mat @ fused[i][0]
+            fused[i][2] = _fused_structure(fused[i][2], structure)
             continue
-        fused.append([mat, wires])
+        fused.append([mat, wires, structure])
         for w in wires:
             last[w] = len(fused) - 1
-    return [(mat, wires) for mat, wires in fused]
+    return [Gate(mat, wires, structure) for mat, wires, structure in fused]
 
 
 def _compile(tape: List[Operation]) -> List[Gate]:
-    """Pre-extract ``(matrix, wires)`` per gate and fuse neighbours."""
-    gates = [(op.matrix, tuple(op.wires)) for op in tape if not isinstance(op, Barrier)]
+    """Extract matrices with static structure and fuse same-wire neighbours."""
+    gates = [
+        Gate(op.matrix, tuple(op.wires), op._structure)
+        for op in tape
+        if not isinstance(op, Barrier)
+    ]
     return _fuse(gates)
 
 
@@ -175,12 +237,12 @@ def _compile_mixed(tape: List[Operation], n_qubits: int) -> List[Gate]:
         bra = tuple(w + n_qubits for w in op.wires)
         if isinstance(op, KrausChannel):
             superop = sum(jnp.kron(K, jnp.conj(K)) for K in op.kraus_matrices())
-            gates.append((superop, ket + bra))
+            gates.append(Gate(superop, ket + bra))
         elif len(ket) <= 2:
-            gates.append((jnp.kron(op.matrix, jnp.conj(op.matrix)), ket + bra))
+            gates.append(Gate(jnp.kron(op.matrix, jnp.conj(op.matrix)), ket + bra))
         else:
-            gates.append((op.matrix, ket))
-            gates.append((jnp.conj(op.matrix), bra))
+            gates.append(Gate(op.matrix, ket))
+            gates.append(Gate(jnp.conj(op.matrix), bra))
     return _fuse(gates)
 
 
@@ -198,8 +260,8 @@ def _run(gates: List[Gate], state: jnp.ndarray, n_qubits: int) -> jnp.ndarray:
     ``2 * n_qubits`` axes; the gates then address ket and bra axes alike.
     """
     psi = state.reshape((2,) * n_qubits)
-    for gate, wires in gates:
-        psi = _apply_gate(psi, gate, wires)
+    for gate, wires, structure in gates:
+        psi = _apply_structured(psi, gate, wires, structure)
     return psi.reshape(2**n_qubits)
 
 
@@ -308,7 +370,7 @@ def _forward_mode(leaves) -> bool:
 def _use_adjoint(tape: List[Operation], gates: List[Gate], initial_state) -> bool:
     """Whether the adjoint VJP applies: every gate unitary, no forward-mode trace."""
     unitary = all(op.is_unitary for op in tape if not isinstance(op, Barrier))
-    return unitary and not _forward_mode([m for m, _ in gates] + [initial_state])
+    return unitary and not _forward_mode([g.matrix for g in gates] + [initial_state])
 
 
 def _adjoint_expval(
@@ -326,7 +388,7 @@ def _adjoint_expval(
     cotangent without the contraction.
 
     Args:
-        gates: Fused ``(matrix, wires)`` pairs from :func:`_compile`.
+        gates: Fused gates from :func:`_compile`.
         n_qubits: Total number of qubits.
         obs: Observables for the expectation values.
         state: Initial flat statevector of shape ``(2**n_qubits,)``.
@@ -336,11 +398,23 @@ def _adjoint_expval(
     """
     dim = 2**n_qubits
     shape = (2,) * n_qubits
-    wires = [w for _, w in gates]
-    const = [not isinstance(m, jax.core.Tracer) for m, _ in gates]
+    wires = [g.wires for g in gates]
+    structures = [g.structure for g in gates]
+    inverse_structures = [
+        s._replace(
+            permutation=tuple(s.permutation.index(i) for i in range(len(s.permutation)))
+        )
+        for s in structures
+    ]
+    const = [
+        bool(g.structure.permutation) or not isinstance(g.matrix, jax.core.Tracer)
+        for g in gates
+    ]
 
     def run(mats, psi0):
-        return _run(list(zip(mats, wires)), psi0, n_qubits)
+        return _run(
+            [Gate(m, w, s) for m, w, s in zip(mats, wires, structures)], psi0, n_qubits
+        )
 
     def measure(psi):
         return measure_state(psi, n_qubits, "expval", obs)
@@ -358,18 +432,23 @@ def _adjoint_expval(
         lam = jax.vjp(measure, psi)[1](ct)[0].reshape(shape)
         psi = psi.reshape(shape)
         mats_bar = []
-        for mat, w, is_const in zip(reversed(mats), reversed(wires), reversed(const)):
-            psi = _apply_gate(psi, jnp.conj(mat).T, w)
+        for mat, w, is_const, structure in zip(
+            reversed(mats),
+            reversed(wires),
+            reversed(const),
+            reversed(inverse_structures),
+        ):
+            psi = _apply_structured(psi, jnp.conj(mat).T, w, structure)
             if is_const:
                 mats_bar.append(jnp.zeros_like(mat))
             else:
                 outer = jnp.einsum(_outer_subscript(n_qubits, w), lam, psi)
                 mats_bar.append(outer.reshape(mat.shape))
-            lam = _apply_gate(lam, mat.T, w)
+            lam = _apply_structured(lam, mat.T, w, structure)
         return mats_bar[::-1], lam.reshape(dim)
 
     expval.defvjp(fwd, bwd)
-    return expval([m for m, _ in gates], state)
+    return expval([g.matrix for g in gates], state)
 
 
 def simulate_and_measure(
