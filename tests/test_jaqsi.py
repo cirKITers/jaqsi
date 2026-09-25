@@ -751,7 +751,7 @@ class TestNoise:
         blocks = simulation._compile_mixed(tape, 3)
         # wire 0: H, RZ, channel, RX, channel -> 1; wire 1: H -> 1; wire 2: H -> 1;
         # CX, CX -> 1; CCX -> ket and bra entries; wire 2: RY, damping -> 1.
-        assert [w for _, w in blocks] == [
+        assert [g.wires for g in blocks] == [
             (0, 3),
             (1, 4),
             (2, 5),

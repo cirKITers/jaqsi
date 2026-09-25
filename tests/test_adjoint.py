@@ -234,11 +234,18 @@ def test_static_evolution_gradient(adjoint_calls) -> None:
 def test_fuse_merges_neighbours_on_same_wires() -> None:
     a, b, c, d, e = (jnp.eye(2) * k for k in range(1, 6))
     cx = jnp.eye(4)
-    fused = simulation._fuse([(a, (0,)), (b, (1,)), (c, (0,)), (cx, (0, 1)), (e, (0,))])
-    assert [w for _, w in fused] == [(0,), (1,), (0, 1), (0,)]
+    fused = simulation._fuse(
+        [
+            simulation.Gate(m, w)
+            for m, w in [(a, (0,)), (b, (1,)), (c, (0,)), (cx, (0, 1)), (e, (0,))]
+        ]
+    )
+    assert [g.wires for g in fused] == [(0,), (1,), (0, 1), (0,)]
     assert jnp.allclose(fused[0][0], c @ a)
-    fused = simulation._fuse([(cx, (0, 1)), (d, (1,)), (cx, (0, 1))])
-    assert [w for _, w in fused] == [(0, 1), (1,), (0, 1)]
+    fused = simulation._fuse(
+        [simulation.Gate(m, w) for m, w in [(cx, (0, 1)), (d, (1,)), (cx, (0, 1))]]
+    )
+    assert [g.wires for g in fused] == [(0, 1), (1,), (0, 1)]
 
 
 @pytest.mark.unittest
