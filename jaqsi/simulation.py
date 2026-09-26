@@ -10,7 +10,7 @@ and keeps ``script.py`` focused on orchestration.
 import itertools
 import string
 from functools import lru_cache
-from typing import List, NamedTuple, Optional, Tuple, Union
+from typing import List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -120,6 +120,47 @@ class Gate(NamedTuple):
     structure: GateStructure = GateStructure()
 
 
+class Permutation(NamedTuple):
+    """A composed permutation of the computational basis.
+
+    ``index`` holds, for every amplitude of the result, the flat index of the
+    amplitude it is taken from; ``inverse`` is the same map for ``U†``.  Both
+    are static, so a permutation carries no cotangent.
+    """
+
+    index: np.ndarray
+    inverse: np.ndarray
+
+
+class Diagonal(NamedTuple):
+    """The composed diagonal of consecutive diagonal gates.
+
+    ``diagonal`` is a rank-``len(wires)`` tensor of shape ``(2,) * k`` over the
+    ascending *wires* the gates act on, so it is the diagonal of their product
+    in the basis of those wires.
+    """
+
+    diagonal: jnp.ndarray
+    wires: Tuple[int, ...]
+
+
+Entry = Union[Gate, Permutation, Diagonal]
+
+
+def _apply_permutation(psi: jnp.ndarray, index: np.ndarray) -> jnp.ndarray:
+    """Gather the amplitudes of a composed basis permutation in one pass."""
+    return jnp.take(psi.reshape(-1), index, unique_indices=True).reshape(psi.shape)
+
+
+def _apply_diagonal(
+    psi: jnp.ndarray, diagonal: jnp.ndarray, wires: Tuple[int, ...]
+) -> jnp.ndarray:
+    """Multiply a rank-n state tensor by a k-qubit diagonal along *wires*."""
+    k = len(wires)
+    broadcast = diagonal.reshape((2,) * k + (1,) * (psi.ndim - k))
+    return psi * jnp.moveaxis(broadcast, tuple(range(k)), wires)
+
+
 def _apply_structured(
     psi: jnp.ndarray,
     gate: jnp.ndarray,
@@ -138,8 +179,7 @@ def _apply_structured(
         out = jnp.stack(parts).reshape((2,) * k + parts[0].shape)
         return jnp.moveaxis(out, tuple(range(k)), wires)
     if structure.diagonal:
-        diagonal = jnp.diag(gate).reshape((2,) * k + (1,) * (psi.ndim - k))
-        return psi * jnp.moveaxis(diagonal, tuple(range(k)), wires)
+        return _apply_diagonal(psi, jnp.diag(gate), wires)
     if structure.controls:
         control = wires[0]
         index: List[Union[int, slice]] = [slice(None)] * psi.ndim
@@ -200,14 +240,109 @@ def _fuse(gates: List[Gate]) -> List[Gate]:
     return [Gate(mat, wires, structure) for mat, wires, structure in fused]
 
 
-def _compile(tape: List[Operation]) -> List[Gate]:
-    """Extract matrices with static structure and fuse same-wire neighbours."""
+def _compose_permutation(blocks: List[Gate], n_qubits: int) -> Permutation:
+    """Compose the basis permutations of *blocks* into one index map.
+
+    The source index of every amplitude is tracked through the blocks in tape
+    order with the same slice-and-stack pattern :func:`_apply_structured`
+    applies to the state, so the composition assumes nothing about the blocks
+    commuting.  The result is a static ``2**n`` int32 array, a quarter of one
+    statevector, whatever the length of the run.
+    """
+    index = np.arange(2**n_qubits, dtype=np.int64).reshape((2,) * n_qubits)
+    for _, wires, structure in blocks:
+        k = len(wires)
+        parts = []
+        for column in structure.permutation:
+            selector: List[Union[int, slice]] = [slice(None)] * n_qubits
+            for i, w in enumerate(wires):
+                selector[w] = (column >> (k - 1 - i)) & 1
+            parts.append(index[tuple(selector)])
+        index = np.moveaxis(
+            np.stack(parts).reshape((2,) * k + parts[0].shape), tuple(range(k)), wires
+        )
+    index = index.reshape(-1).astype(np.int32)
+    inverse = np.empty_like(index)
+    inverse[index] = np.arange(index.size, dtype=np.int32)
+    return Permutation(index, inverse)
+
+
+def _compose_diagonal(blocks: List[Gate]) -> Diagonal:
+    """Multiply the diagonals of *blocks* over their union of wires.
+
+    Diagonals are elementwise in the computational basis, so the product is
+    formed by broadcasting each block's diagonal onto the union axes.  The
+    factors stay in the trace, which keeps the cotangent chain to the block
+    parameters intact.
+    """
+    wires = tuple(sorted({w for block in blocks for w in block.wires}))
+    axis = {w: i for i, w in enumerate(wires)}
+    diagonal = jnp.ones((2,) * len(wires), dtype=cdtype())
+    for matrix, block_wires, _ in blocks:
+        k = len(block_wires)
+        factor = jnp.diag(matrix).reshape((2,) * k + (1,) * (len(wires) - k))
+        diagonal = diagonal * jnp.moveaxis(
+            factor, tuple(range(k)), tuple(axis[w] for w in block_wires)
+        )
+    return Diagonal(diagonal, wires)
+
+
+def _fuse_runs(gates: List[Gate], n_qubits: int) -> List[Entry]:
+    """Merge runs of same-kind structured blocks into one pass each.
+
+    :func:`_fuse` only merges blocks that share their wires.  Consecutive
+    permutations compose into a single basis-index gather and consecutive
+    diagonals into a single elementwise factor on *any* wires, which turns a
+    permutation or diagonal layer into one pass over the state instead of one
+    per gate.  A run of a single block is left as it is: composing it would
+    cost the same pass and, for a permutation, a ``2**n`` index array.
+
+    Args:
+        gates: Same-wire-fused blocks in tape order.
+        n_qubits: Total number of qubits.
+
+    Returns:
+        The plan :func:`_run` applies, in tape order.
+    """
+    plan: List[Entry] = []
+    run: List[Gate] = []
+    kind: Optional[str] = None
+
+    def flush() -> None:
+        if len(run) > 1:
+            plan.append(
+                _compose_permutation(run, n_qubits)
+                if kind == "permutation"
+                else _compose_diagonal(run)
+            )
+        else:
+            plan.extend(run)
+        run.clear()
+
+    for gate in gates:
+        gate_kind = (
+            "permutation"
+            if gate.structure.permutation
+            else "diagonal"
+            if gate.structure.diagonal
+            else None
+        )
+        if gate_kind != kind:
+            flush()
+            kind = gate_kind
+        (plan if gate_kind is None else run).append(gate)
+    flush()
+    return plan
+
+
+def _compile(tape: List[Operation], n_qubits: int) -> List[Entry]:
+    """Extract matrices with static structure, fuse same-wire neighbours and runs."""
     gates = [
         Gate(op.matrix, tuple(op.wires), op._structure)
         for op in tape
         if not isinstance(op, Barrier)
     ]
-    return _fuse(gates)
+    return _fuse_runs(_fuse(gates), n_qubits)
 
 
 def _compile_mixed(tape: List[Operation], n_qubits: int) -> List[Gate]:
@@ -253,15 +388,24 @@ def _initial_state(dim: int, initial_state: Optional[jnp.ndarray]) -> jnp.ndarra
     return jnp.asarray(initial_state, dtype=cdtype()).reshape(dim)
 
 
-def _run(gates: List[Gate], state: jnp.ndarray, n_qubits: int) -> jnp.ndarray:
-    """Apply compiled *gates* to a flat array of ``n_qubits`` binary axes.
+def _apply_entry(psi: jnp.ndarray, entry: Entry) -> jnp.ndarray:
+    """Apply one plan entry to a rank-n state tensor."""
+    if isinstance(entry, Permutation):
+        return _apply_permutation(psi, entry.index)
+    if isinstance(entry, Diagonal):
+        return _apply_diagonal(psi, entry.diagonal, entry.wires)
+    return _apply_structured(psi, entry.matrix, entry.wires, entry.structure)
+
+
+def _run(plan: Sequence[Entry], state: jnp.ndarray, n_qubits: int) -> jnp.ndarray:
+    """Apply a compiled *plan* to a flat array of ``n_qubits`` binary axes.
 
     Density-matrix simulation passes the flattened ``(dim, dim)`` matrix with
     ``2 * n_qubits`` axes; the gates then address ket and bra axes alike.
     """
     psi = state.reshape((2,) * n_qubits)
-    for gate, wires, structure in gates:
-        psi = _apply_structured(psi, gate, wires, structure)
+    for entry in plan:
+        psi = _apply_entry(psi, entry)
     return psi.reshape(2**n_qubits)
 
 
@@ -278,9 +422,10 @@ def simulate_pure(
     only the initial and final conversions to/from the flat ``(2**n,)``
     representation incur a reshape.
 
-    Gate matrices and wire tuples are pre-extracted from the tape and
-    neighbouring gates on identical wires are fused (see :func:`_compile`), so
-    each loop iteration is a single :func:`_apply_gate` call.
+    Gate matrices and wire tuples are pre-extracted from the tape, neighbouring
+    gates on identical wires are fused and runs of permutations or diagonals are
+    composed (see :func:`_compile`), so each loop iteration is a single pass
+    over the state.
 
     Args:
         tape: Ordered list of gate operations to apply.
@@ -292,7 +437,7 @@ def simulate_pure(
         Statevector of shape ``(2**n_qubits,)``.
     """
     state = _initial_state(2**n_qubits, initial_state)
-    return _run(_compile(tape), state, n_qubits)
+    return _run(_compile(tape, n_qubits), state, n_qubits)
 
 
 def simulate_mixed(
@@ -367,28 +512,48 @@ def _forward_mode(leaves) -> bool:
     return False
 
 
-def _use_adjoint(tape: List[Operation], gates: List[Gate], initial_state) -> bool:
+def _parameter(entry: Union[Gate, Diagonal]) -> jnp.ndarray:
+    """The differentiable array of a plan entry; permutations have none."""
+    return entry.diagonal if isinstance(entry, Diagonal) else entry.matrix
+
+
+def _substitute(
+    entry: Union[Gate, Diagonal], parameter: jnp.ndarray
+) -> Union[Gate, Diagonal]:
+    """*entry* with its differentiable array replaced by *parameter*."""
+    if isinstance(entry, Diagonal):
+        return entry._replace(diagonal=parameter)
+    return entry._replace(matrix=parameter)
+
+
+def _parameters(plan: Sequence[Entry]) -> List[jnp.ndarray]:
+    """The differentiable arrays of *plan* in order, skipping permutations."""
+    return [_parameter(e) for e in plan if not isinstance(e, Permutation)]
+
+
+def _use_adjoint(tape: List[Operation], plan: Sequence[Entry], initial_state) -> bool:
     """Whether the adjoint VJP applies: every gate unitary, no forward-mode trace."""
     unitary = all(op.is_unitary for op in tape if not isinstance(op, Barrier))
-    return unitary and not _forward_mode([g.matrix for g in gates] + [initial_state])
+    return unitary and not _forward_mode(_parameters(plan) + [initial_state])
 
 
 def _adjoint_expval(
-    gates: List[Gate], n_qubits: int, obs: List[Operation], state: jnp.ndarray
+    plan: Sequence[Entry], n_qubits: int, obs: List[Operation], state: jnp.ndarray
 ) -> jnp.ndarray:
     """Expectation values of a pure circuit with an adjoint-method VJP.
 
     The forward pass is the plain gate loop.  The backward pass reads no tape
-    of intermediate states: it walks the gates in reverse, undoing each with
-    ``U^dagger`` on the state while propagating the cotangent with ``U^T``, so
-    gradient memory stays at a few statevectors regardless of depth.  The
-    cotangents are those of the gate *matrices* (and of the initial state);
-    JAX chains them into the gate parameters through the matrix construction,
-    so no per-gate generator is needed.  Constant matrices get a zero
-    cotangent without the contraction.
+    of intermediate states: it walks the plan in reverse, undoing each entry
+    with ``U^dagger`` on the state while propagating the cotangent with
+    ``U^T``, so gradient memory stays at a few statevectors regardless of
+    depth.  The cotangents are those of the gate *matrices* and fused
+    *diagonals* (and of the initial state); JAX chains them into the gate
+    parameters through the matrix construction, so no per-gate generator is
+    needed.  Constant entries get a zero cotangent without the contraction,
+    and a basis permutation needs none at all.
 
     Args:
-        gates: Fused gates from :func:`_compile`.
+        plan: Compiled entries from :func:`_compile`.
         n_qubits: Total number of qubits.
         obs: Observables for the expectation values.
         state: Initial flat statevector of shape ``(2**n_qubits,)``.
@@ -398,57 +563,90 @@ def _adjoint_expval(
     """
     dim = 2**n_qubits
     shape = (2,) * n_qubits
-    wires = [g.wires for g in gates]
-    structures = [g.structure for g in gates]
-    inverse_structures = [
-        s._replace(
-            permutation=tuple(s.permutation.index(i) for i in range(len(s.permutation)))
-        )
-        for s in structures
-    ]
+    # The differentiable arguments of the VJP, in plan order: one array per
+    # entry except the static permutations.  Both loops below walk the plan and
+    # advance through them in step.
+    params = _parameters(plan)
     const = [
-        bool(g.structure.permutation) or not isinstance(g.matrix, jax.core.Tracer)
-        for g in gates
+        (isinstance(entry, Gate) and bool(entry.structure.permutation))
+        or not isinstance(_parameter(entry), jax.core.Tracer)
+        for entry in plan
+        if not isinstance(entry, Permutation)
+    ]
+    inverse_structures = [
+        entry.structure._replace(
+            permutation=tuple(
+                entry.structure.permutation.index(i)
+                for i in range(len(entry.structure.permutation))
+            )
+        )
+        if isinstance(entry, Gate)
+        else GateStructure()
+        for entry in plan
     ]
 
-    def run(mats, psi0):
-        return _run(
-            [Gate(m, w, s) for m, w, s in zip(mats, wires, structures)], psi0, n_qubits
-        )
+    def run(params, psi0):
+        entries: List[Entry] = []
+        slot = 0
+        for entry in plan:
+            if isinstance(entry, Permutation):
+                entries.append(entry)
+                continue
+            entries.append(_substitute(entry, params[slot]))
+            slot += 1
+        return _run(entries, psi0, n_qubits)
 
     def measure(psi):
         return measure_state(psi, n_qubits, "expval", obs)
 
     @jax.custom_vjp
-    def expval(mats, psi0):
-        return measure(run(mats, psi0))
+    def expval(params, psi0):
+        return measure(run(params, psi0))
 
-    def fwd(mats, psi0):
-        psi = run(mats, psi0)
-        return measure(psi), (mats, psi)
+    def fwd(params, psi0):
+        psi = run(params, psi0)
+        return measure(psi), (params, psi)
 
     def bwd(res, ct):
-        mats, psi = res
+        params, psi = res
         lam = jax.vjp(measure, psi)[1](ct)[0].reshape(shape)
         psi = psi.reshape(shape)
-        mats_bar = []
-        for mat, w, is_const, structure in zip(
-            reversed(mats),
-            reversed(wires),
-            reversed(const),
-            reversed(inverse_structures),
-        ):
-            psi = _apply_structured(psi, jnp.conj(mat).T, w, structure)
-            if is_const:
-                mats_bar.append(jnp.zeros_like(mat))
-            else:
-                outer = jnp.einsum(_outer_subscript(n_qubits, w), lam, psi)
-                mats_bar.append(outer.reshape(mat.shape))
-            lam = _apply_structured(lam, mat.T, w, structure)
-        return mats_bar[::-1], lam.reshape(dim)
+        bars = []
+        slot = len(params)
+        for entry, inverse in zip(reversed(plan), reversed(inverse_structures)):
+            if isinstance(entry, Permutation):
+                psi = _apply_permutation(psi, entry.inverse)
+                lam = _apply_permutation(lam, entry.inverse)
+                continue
+            slot -= 1
+            parameter = params[slot]
+            if isinstance(entry, Diagonal):
+                psi = _apply_diagonal(psi, jnp.conj(parameter), entry.wires)
+                # The cotangent of a diagonal is the diagonal of the matrix
+                # cotangent: one reduction instead of the outer product.
+                bars.append(
+                    jnp.zeros_like(parameter)
+                    if const[slot]
+                    else jnp.sum(
+                        lam * psi,
+                        axis=tuple(a for a in range(psi.ndim) if a not in entry.wires),
+                    )
+                )
+                lam = _apply_diagonal(lam, parameter, entry.wires)
+                continue
+            psi = _apply_structured(psi, jnp.conj(parameter).T, entry.wires, inverse)
+            bars.append(
+                jnp.zeros_like(parameter)
+                if const[slot]
+                else jnp.einsum(
+                    _outer_subscript(n_qubits, entry.wires), lam, psi
+                ).reshape(parameter.shape)
+            )
+            lam = _apply_structured(lam, parameter.T, entry.wires, inverse)
+        return bars[::-1], lam.reshape(dim)
 
     expval.defvjp(fwd, bwd)
-    return expval([g.matrix for g in gates], state)
+    return expval(params, state)
 
 
 def simulate_and_measure(
@@ -515,12 +713,12 @@ def simulate_and_measure(
             return sample_shots(exact_probs, n_qubits, type, obs, shots, key)
         return measure_density(rho, n_qubits, type, obs)
 
-    gates = _compile(tape)
+    plan = _compile(tape, n_qubits)
     state = _initial_state(2**n_qubits, initial_state)
     exact_expval = type == "expval" and shots is None
-    if exact_expval and adjoint and _use_adjoint(tape, gates, initial_state):
-        return _adjoint_expval(gates, n_qubits, obs, state)
-    state = _run(gates, state, n_qubits)
+    if exact_expval and adjoint and _use_adjoint(tape, plan, initial_state):
+        return _adjoint_expval(plan, n_qubits, obs, state)
+    state = _run(plan, state, n_qubits)
 
     if shots is not None and type in ("probs", "expval"):
         exact_probs = jnp.abs(state) ** 2

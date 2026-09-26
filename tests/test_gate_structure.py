@@ -37,25 +37,36 @@ def tape(p):
     ]
 
 
+def layered(p):
+    """A permutation layer and a diagonal layer, each spanning several wires."""
+    return (
+        [g.RY(p[i], i) for i in range(4)]
+        + [g.CX([i, (i + 1) % 4]) for i in range(4)]
+        + [g.RZ(p[i], i) for i in range(4)]
+        + [g.SWAP([1, 2])]
+    )
+
+
 def dense(ops, state):
     for op in ops:
         state = op.apply_to_state(state, 4)
     return state
 
 
+@pytest.mark.parametrize("build", [tape, layered])
 @pytest.mark.parametrize("depth", [1, 4])
-def test_values_and_derivatives(depth):
+def test_values_and_derivatives(build, depth):
     p = jnp.linspace(0.2, 0.9, 4)
     state = initial_state()
     obs = [g.PauliX(0), g.PauliY(3), g.PauliZ(2)]
 
     def actual(p, state):
         return sim.simulate_and_measure(
-            tape(p) * depth, 4, "expval", obs, False, initial_state=state
+            build(p) * depth, 4, "expval", obs, False, initial_state=state
         )
 
     def reference(p, state):
-        return sim.measure_state(dense(tape(p) * depth, state), 4, "expval", obs)
+        return sim.measure_state(dense(build(p) * depth, state), 4, "expval", obs)
 
     np.testing.assert_allclose(
         jax.jit(actual)(p, state), reference(p, state), atol=1e-12
@@ -91,7 +102,8 @@ def test_structure_survives_fusion():
             g.S(2),
             g.CRX(0.2, [1, 0]),
             g.CRY(0.4, [1, 0]),
-        ]
+        ],
+        4,
     )
     assert len(blocks) == 3
     assert blocks[0].structure.permutation == (0, 3, 1, 2)
@@ -99,10 +111,27 @@ def test_structure_survives_fusion():
     assert blocks[2].structure.controls == 1
 
 
+def test_runs_fuse_across_wires():
+    plan = sim._compile(layered(jnp.linspace(0.2, 0.9, 4)), 4)
+    assert [type(entry).__name__ for entry in plan] == (
+        ["Gate"] * 4 + ["Permutation", "Diagonal", "Gate"]
+    )
+    assert plan[5].wires == (0, 1, 2, 3)
+
+    # The index map is the composition of the whole ring, in tape order.
+    state = initial_state()
+    ring = [g.CX([i, (i + 1) % 4]) for i in range(4)]
+    np.testing.assert_allclose(
+        sim._apply_permutation(state.reshape((2,) * 4), plan[4].index).reshape(-1),
+        dense(ring, state),
+        atol=1e-12,
+    )
+
+
 def test_dense_override_and_mixed_fusion():
     matrix = g.H._matrix
     op = g.PauliX(0, matrix=matrix)
-    blocks = sim._compile([op, g.RZ(0.2, 0)])
+    blocks = sim._compile([op, g.RZ(0.2, 0)], 1)
     assert not blocks[0].structure.permutation
     assert not blocks[0].structure.diagonal
     np.testing.assert_allclose(sim.simulate_pure([op], 1), matrix[:, 0])
