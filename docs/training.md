@@ -16,10 +16,12 @@ import jax
 import jax.numpy as jnp
 import optax
 
+# Before importing jaqsi: gate matrices are cast to the active dtype, and
+# modules that build JAX arrays at import time bake the dtype in.
+jax.config.update("jax_enable_x64", True)
+
 import jaqsi
 from jaqsi import Gates
-
-jax.config.update("jax_enable_x64", True)
 
 
 def circuit(params):
