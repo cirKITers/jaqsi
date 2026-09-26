@@ -1,6 +1,7 @@
 import pytest
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from jaqsi.pulses import PulseGates, PulseInformation
 from jaqsi import Evolution, Script
@@ -13,6 +14,26 @@ def assert_default_pulse_state():
     assert PulseGates._active_envelope == PulseInformation.DEFAULT_ENVELOPE
     assert PulseGates._active_rwa is PulseInformation.DEFAULT_RWA
     assert PulseGates._active_frame == PulseInformation.DEFAULT_FRAME
+
+
+@pytest.mark.parametrize("name", ["X", "Y", "Z", "Id", "_H_CZ", "_H_corr"])
+def test_hamiltonian_constants_are_exact_host_arrays(name):
+    """Pulse Hamiltonian terms keep full precision whatever the active dtype.
+
+    Built with a JAX dtype at import they would be complex64 unless x64 was
+    already on, which rounds the pi factors of the CZ and correction
+    Hamiltonians to 1e-8.  :class:`~jaqsi.operations.Hermitian` casts them to
+    the active dtype instead.
+    """
+    matrix = getattr(PulseGates, name)
+    assert isinstance(matrix, np.ndarray), f"{name} pins its dtype"
+    assert matrix.dtype == np.complex128
+
+
+def test_hamiltonian_pi_factors_are_double_precision():
+    """The pi factors of the CZ and correction Hamiltonians are exact."""
+    assert PulseGates._H_corr[0, 0] == np.pi / 2
+    assert PulseGates._H_CZ[3, 3] == np.pi
 
 
 def test_snapshot_restore_restores_config_and_leaf_params():

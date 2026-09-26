@@ -1058,17 +1058,22 @@ class PulseGates:
     omega_q = 10 * jnp.pi
     omega_c = 10 * jnp.pi
 
-    X = jnp.array([[0, 1], [1, 0]])
-    Y = jnp.array([[0, -1j], [1j, 0]])
-    Z = jnp.array([[1, 0], [0, -1]])
+    # Exact host constants.  Building these with a JAX dtype pins dtype *and*
+    # value to whatever was active when this module was imported: in complex64
+    # the pi/4 and pi/2 factors below are only good to 1e-8, and every pulse
+    # Hamiltonian derived from them inherits that.  :class:`Hermitian` casts
+    # them to the active dtype (see :func:`~jaqsi.operations.cdtype`).
+    X = np.array([[0, 1], [1, 0]], dtype=np.complex128)
+    Y = np.array([[0, -1j], [1j, 0]], dtype=np.complex128)
+    Z = np.array([[1, 0], [0, -1]], dtype=np.complex128)
 
-    Id = jnp.eye(2, dtype=jnp.complex64)
+    Id = np.eye(2, dtype=np.complex128)
 
-    _H_CZ = (jnp.pi / 4) * (
-        jnp.kron(Id, Id) - jnp.kron(Z, Id) - jnp.kron(Id, Z) + jnp.kron(Z, Z)
+    _H_CZ = (np.pi / 4) * (
+        np.kron(Id, Id) - np.kron(Z, Id) - np.kron(Id, Z) + np.kron(Z, Z)
     )
 
-    _H_corr = jnp.pi / 2 * jnp.eye(2, dtype=jnp.complex64)
+    _H_corr = np.pi / 2 * np.eye(2, dtype=np.complex128)
 
     _active_envelope: str = "gaussian"
     # Mirrors :attr:`PulseInformation._rwa`; kept here for introspection
