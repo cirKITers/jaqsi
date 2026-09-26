@@ -22,7 +22,6 @@ from jaqsi.gateset import (
 )
 from jaqsi.noise import BitFlip
 
-jax.config.update("jax_enable_x64", True)
 
 N = 3
 OBS = [PauliZ(wires=0), PauliX(wires=1), build_parity_observable([0, 2])]

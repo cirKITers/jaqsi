@@ -18,6 +18,7 @@ from jaqsi.operations import (
     Operation,
     Hermitian,
     ParametrizedHamiltonian,
+    cdtype,
     # noise channels
 )
 from jaqsi.gateset import (
@@ -54,13 +55,11 @@ from jaqsi.gates import (
     PulseInformation,
     PulseGates,
 )
-from jaqsi import memory, simulation
+from jaqsi import gateset, memory, simulation
 
 import logging
 
 logger = logging.getLogger(__name__)
-
-jax.config.update("jax_enable_x64", True)  # tests use atol=1e-10
 
 
 def bell_circuit(*args, **kwargs):
@@ -1429,7 +1428,36 @@ class TestShots:
         )
 
 
+# Every gate whose matrix does not depend on a parameter, discovered rather
+# than listed so a new one is covered as soon as it is added.
+CONSTANT_MATRIX_GATES = [
+    cls
+    for cls in vars(gateset).values()
+    if isinstance(cls, type) and issubclass(cls, Operation) and cls._matrix is not None
+]
+
+
 class TestGateOperations:
+    @pytest.mark.unittest
+    @pytest.mark.parametrize("cls", CONSTANT_MATRIX_GATES, ids=lambda cls: cls.__name__)
+    def test_constant_matrix_is_exact_and_cast_at_use(self, cls):
+        """Parameter-free matrices are exact host arrays, cast when used.
+
+        Building them with ``cdtype()`` at class-definition time would pin both
+        dtype and value to whatever was active when :mod:`jaqsi.gateset` was
+        imported: enabling x64 afterwards would leave H unitary only to single
+        precision, which the adjoint sweep inherits when it inverts gates.
+        """
+        stored = cls._matrix
+        assert isinstance(stored, np.ndarray), f"{cls.__name__} pins its dtype"
+        assert stored.dtype == np.complex128
+        if cls.is_unitary:
+            np.testing.assert_allclose(
+                stored @ stored.conj().T, np.eye(stored.shape[0]), atol=1e-15
+            )
+        wires = list(range(cls._num_wires or 1))
+        assert cls(wires=wires).matrix.dtype == cdtype()
+
     @pytest.mark.unittest
     def test_dagger(self):
         def circuit():

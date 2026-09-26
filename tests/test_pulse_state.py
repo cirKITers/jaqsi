@@ -5,8 +5,6 @@ import jax.numpy as jnp
 from jaqsi.pulses import PulseGates, PulseInformation
 from jaqsi import Evolution, Script
 
-jax.config.update("jax_enable_x64", True)
-
 
 def assert_default_pulse_state():
     assert PulseInformation.get_envelope() == PulseInformation.DEFAULT_ENVELOPE

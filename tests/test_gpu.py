@@ -1,9 +1,9 @@
 """GPU backend checks.
 
-The equivalence test is skipped without an accelerator.  Run this module on
-its own (``pytest tests/test_gpu.py``) to exercise it in complex64, which is
-where the forced matmul precision matters; other test modules enable x64
-globally.
+The equivalence test is skipped without an accelerator.  ``tests/conftest.py``
+enables x64 for the whole session, so run this module as
+``JAX_ENABLE_X64=0 pytest tests/test_gpu.py`` to exercise it in complex64,
+which is where the forced matmul precision matters.
 """
 
 import jax

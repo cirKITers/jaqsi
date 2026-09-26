@@ -1,6 +1,17 @@
+import os
+
+import jax
 import pytest
 
-from jaqsi.pulses import PulseInformation
+# Enable x64 before jaqsi is imported anywhere in the session, not per test
+# module: modules that build JAX arrays at import time bake in whatever dtype
+# was active then.  The tests' 1e-10 tolerances need complex128 throughout.
+# ``JAX_ENABLE_X64=0`` opts out, which is how ``tests/test_gpu.py`` gets its
+# complex64 run.
+if os.environ.get("JAX_ENABLE_X64") != "0":
+    jax.config.update("jax_enable_x64", True)
+
+from jaqsi.pulses import PulseInformation  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
