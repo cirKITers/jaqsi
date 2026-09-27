@@ -3,6 +3,7 @@ import jax
 
 import jax.numpy as jnp
 import numpy as np
+import pickle
 import time
 
 
@@ -51,6 +52,7 @@ from jaqsi.noise import (
     ThermalRelaxationError,
 )
 from jaqsi.gates import (
+    Gates,
     PulseEnvelope,
     PulseInformation,
     PulseGates,
@@ -3158,3 +3160,18 @@ def test_simulate_pure_matches_lifted_matrix(gate, wires) -> None:
     for op in ops:
         ref = op.lifted_matrix(n_qubits) @ ref
     assert jnp.allclose(state, ref, atol=1e-12)
+
+
+@pytest.mark.unittest
+def test_script_and_gates_pickle() -> None:
+    """A used script pickles without its jit cache, and gives the same result."""
+    script = Script(f=parametrized_circuit)
+    theta = jnp.array(0.5)
+    expected = script.execute(type="expval", obs=[PauliZ(0)], args=(theta,))
+
+    reopened = pickle.loads(pickle.dumps(script))
+    assert reopened._jit_cache == {}
+    result = reopened.execute(type="expval", obs=[PauliZ(0)], args=(theta,))
+    assert jnp.allclose(result, expected)
+
+    assert pickle.loads(pickle.dumps(Gates.RY)).__name__ == "RY"

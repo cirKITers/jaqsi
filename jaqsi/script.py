@@ -188,6 +188,11 @@ class Script:
         self._n_qubits = n_qubits
         self._jit_cache: dict = {}  # keyed on (type, in_axes, arg_shapes, gateError)
 
+    def __getstate__(self) -> dict:
+        # The compiled plans are closures that do not pickle; being a cache,
+        # they are dropped and rebuilt on first use.
+        return {**self.__dict__, "_jit_cache": {}}
+
     def record(self, *args, **kwargs) -> List[Operation]:
         """Run the circuit function and collect the recorded operations.
 
