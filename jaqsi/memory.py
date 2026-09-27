@@ -51,11 +51,12 @@ def _cache_bytes_per_cpu(default: int = 8 * 1024**2) -> int:
 # Cache budget for one batch tile, see :func:`tile_size`.
 CACHE_BYTES: int = _cache_bytes_per_cpu()
 
-# Amplitudes per sample (``2**n`` for a statevector, ``4**n`` for a density
-# matrix) below which a batch is not split over devices: under it, the
-# dispatch to each device costs more than the split saves (break-even at
-# ``n=10`` for a forward pass of a 4-layer hea, ``n=9`` for its gradient).
-SHARD_MIN_SIZE: int = 2**10
+# Amplitudes per batch (batch size times ``2**n`` for statevectors, ``4**n``
+# for density matrices) below which a batch is not split over devices: under
+# it, the dispatch to each device costs more than the split saves.  The
+# break-even follows the batch's total size rather than the qubit count: about
+# ``2**14`` for a forward pass and ``2**12`` for a gradient, from n=4 to n=10.
+SHARD_MIN_SIZE: int = 2**13
 
 
 def _element_sizes() -> Tuple[int, int]:
