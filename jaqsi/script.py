@@ -2,14 +2,16 @@ from typing import Any, Callable, Hashable, List, NamedTuple, Optional, Tuple, U
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import equinox as eqx
+from jax.sharding import Mesh, PartitionSpec as P
 
 from jaqsi.operations import Operation
 from jaqsi.noise import KrausChannel
 from jaqsi.tape import recording, pulse_recording
 from jaqsi.drawing import draw_text, draw_mpl, draw_tikz
 from jaqsi.unitary import UnitaryGates
-from jaqsi.evolution import Evolution
+from jaqsi.evolution import Evolution, PendingEvolution
 from jaqsi import simulation, memory
 
 
@@ -30,6 +32,97 @@ def make_hashable(obj):
     return obj
 
 
+def _pad(a: Any, ax: int, n: int) -> Any:
+    """Append *n* copies of the last entry along axis *ax*."""
+    if n == 0:
+        return a
+    last = jax.lax.index_in_dim(a, a.shape[ax] - 1, axis=ax)
+    return jnp.concatenate([a, jnp.repeat(last, n, axis=ax)], axis=ax)
+
+
+def _vectorize(
+    single: Callable,
+    in_axes: Tuple,
+    n_qubits: int,
+    use_density: bool,
+    reverse: bool,
+    shard: bool,
+) -> Callable:
+    """Map *single* over the batch axes *in_axes*, like ``jax.vmap``.
+
+    With *shard*, a batch that divides evenly over all ``jax.devices()`` is
+    split over them with ``jax.shard_map``, provided one sample holds at least
+    :data:`~jaqsi.memory.SHARD_MIN_SIZE` amplitudes; an uneven split would
+    replicate the output on every device.  Each device runs its part in tiles
+    of :func:`~jaqsi.memory.tile_size` with ``jax.lax.map``, so the working set
+    of a tile stays in cache.  The tiles are padded with copies of the last
+    sample, so the kernel is compiled once rather than again for a remainder.
+    With one device and a batch that fits, this is a plain ``jax.vmap``.
+    """
+
+    def tiled(*args):
+        batch_size = Script._batch_size(args, in_axes)
+        tile = memory.tile_size(n_qubits, batch_size, use_density, reverse)
+        if tile >= batch_size:
+            return jax.vmap(single, in_axes=in_axes)(*args)
+        pad = -batch_size % tile
+        xs = [
+            _pad(jnp.moveaxis(a, ax, 0), 0, pad)
+            for a, ax in zip(args, in_axes)
+            if ax is not None
+        ]
+
+        def one(x):
+            it = iter(x)
+            return single(
+                *(a if ax is None else next(it) for a, ax in zip(args, in_axes))
+            )
+
+        return jax.lax.map(one, xs, batch_size=tile)[:batch_size]
+
+    def run(*args):
+        batch_size = Script._batch_size(args, in_axes)
+        # Always all devices, so that sharded results share one device set and
+        # combine.
+        devices = jax.devices()
+        size = 4**n_qubits if use_density else 2**n_qubits
+        if (
+            not shard
+            or len(devices) == 1
+            or batch_size % len(devices)
+            or size < memory.SHARD_MIN_SIZE
+        ):
+            return tiled(*args)
+        mesh = Mesh(np.array(devices), ("batch",))
+
+        # Arrays pass through the shard_map, batched ones split; Python statics
+        # are closed over.
+        arrays = [i for i, a in enumerate(args) if hasattr(a, "shape")]
+        specs = []
+        for i in arrays:
+            ax = in_axes[i]
+            specs.append(P() if ax is None else P(*([None] * ax), "batch"))
+
+        def per_device(*shard_arrays):
+            full = list(args)
+            for i, a in zip(arrays, shard_arrays):
+                full[i] = a
+            return tiled(*full)
+
+        # ``check_vma=False``: the adjoint VJP returns a per-device cotangent
+        # for the replicated initial state, which the varying-axis check
+        # rejects although the transpose sums it correctly.
+        return jax.shard_map(
+            per_device,
+            mesh=mesh,
+            in_specs=tuple(specs),
+            out_specs=P("batch"),
+            check_vma=False,
+        )(*(args[i] for i in arrays))
+
+    return run
+
+
 class _BatchPlan(NamedTuple):
     """Compiled artefacts for one batched circuit signature.
 
@@ -38,9 +131,9 @@ class _BatchPlan(NamedTuple):
     unpack ``batched_fn, *_ = plan``.
 
     Attributes:
-        batched_fn: ``eqx.filter_jit(jax.vmap(...))`` wrapper; always valid,
+        batched_fn: ``eqx.filter_jit`` wrapper of :func:`_vectorize`; always valid,
             including under an outer transform and in shot mode.
-        plain_fn: AOT-eligible ``jax.jit(jax.vmap(...))`` wrapper, or ``None``
+        plain_fn: AOT-eligible ``jax.jit`` wrapper of the same function, or ``None``
             when no concrete-array fast path applies (non-array argument, shot
             mode, or running under a transform).
         n_qubits: Qubit count derived from the recorded tape.
@@ -282,19 +375,21 @@ class Script:
 
     def _record_metadata(
         self, scalar_args: tuple, kwargs: dict, obs: List[Operation], type: str
-    ) -> Tuple[int, bool]:
+    ) -> Tuple[int, bool, bool]:
         """Trace the tape from scalar slices to derive batch-invariant metadata.
 
-        Recording once with scalar slices determines ``n_qubits`` and whether
-        noise channels are present (forcing density-matrix simulation) without
-        running the full batch.
+        Recording once with scalar slices determines ``n_qubits``, whether
+        noise channels are present (forcing density-matrix simulation) and
+        whether pulse gates are solved by an ODE solver, without running the
+        full batch.
 
         Returns:
-            ``(n_qubits, use_density)``.
+            ``(n_qubits, use_density, has_pulses)``.
         """
         tape = self.record(*scalar_args, **kwargs)
         n_qubits = self._n_qubits or simulation.infer_n_qubits(tape, obs)
-        return n_qubits, simulation.has_noise(tape)
+        has_pulses = any(isinstance(op, PendingEvolution) for op in tape)
+        return n_qubits, simulation.has_noise(tape), has_pulses
 
     def _build_plan(
         self,
@@ -304,7 +399,7 @@ class Script:
         kwargs: dict,
         in_axes: Tuple,
         has_initial_state: bool = False,
-        adjoint: bool = True,
+        ad_mode: Optional[str] = None,
     ) -> _BatchPlan:
         """Trace the circuit once and build the cacheable execution plan.
 
@@ -319,7 +414,10 @@ class Script:
         When *has_initial_state* is ``True`` the last entry of *args* is the
         (vmapped) initial statevector rather than a circuit argument; it is
         stripped before recording the tape and forwarded to
-        :func:`~jaqsi.simulation.simulate_and_measure`, as is *adjoint*.
+        :func:`~jaqsi.simulation.simulate_and_measure`.  *ad_mode* (see
+        :func:`~jaqsi.simulation._ad_mode`) disables the adjoint VJP under
+        forward mode and sizes the batch tiles for the adjoint gradient under
+        reverse mode.
         """
         scalar_args = tuple(
             self._slice_first(a, ax) if ax is not None else a
@@ -327,7 +425,9 @@ class Script:
         )
         # The trailing scalar is the initial state, not a circuit argument.
         record_args = scalar_args[:-1] if has_initial_state else scalar_args
-        n_qubits, use_density = self._record_metadata(record_args, kwargs, obs, type)
+        n_qubits, use_density, has_pulses = self._record_metadata(
+            record_args, kwargs, obs, type
+        )
 
         # Re-recording inside this closure is necessary: tape operations may
         # have matrices that depend on the batched argument (e.g. RX(theta)
@@ -346,8 +446,21 @@ class Script:
                 obs,
                 use_density,
                 initial_state=init_state,
-                adjoint=adjoint,
+                adjoint=ad_mode != "forward",
             )
+
+        # Reverse mode through diffrax's checkpointed ODE loop fails inside
+        # ``jax.shard_map`` (JAX 0.11.1, equinox 0.13.8), so such plans run on
+        # one device.
+        reverse = ad_mode == "reverse"
+        vectorized = _vectorize(
+            _single_execute,
+            in_axes,
+            n_qubits,
+            use_density,
+            reverse,
+            shard=not (reverse and has_pulses),
+        )
 
         # Wrapping the vmapped function in eqx.filter_jit: (1) treats non-array
         # arguments as static, so circuit signatures mixing arrays and Python
@@ -356,7 +469,7 @@ class Script:
         # NOTE: when altering properties of the model, this might not get
         # re-compiled.
         # TODO: we might want to rework the data_reupload mechanism at some point
-        batched_fn = eqx.filter_jit(jax.vmap(_single_execute, in_axes=in_axes))
+        batched_fn = eqx.filter_jit(vectorized)
 
         # AOT eligibility is a structural property of the signature: plain
         # ``jax.jit`` has no static-argument handling, so it is valid only when
@@ -368,7 +481,7 @@ class Script:
         # transform — its use is gated off there by the caller.
         plain_fn = None
         if all(hasattr(a, "shape") for a in args):
-            plain_fn = jax.jit(jax.vmap(_single_execute, in_axes=in_axes))
+            plain_fn = jax.jit(vectorized)
 
         return _BatchPlan(batched_fn, plain_fn, n_qubits, use_density)
 
@@ -451,8 +564,9 @@ class Script:
 
         The circuit function is traced once in Python with scalar slices to
         record the tape, determine ``n_qubits``, and detect noise.  The
-        resulting pure simulation kernel is then vmapped over the requested
-        axes.
+        resulting pure simulation kernel is then mapped over the requested
+        axes by :func:`_vectorize`: split over all JAX devices and run in
+        cache-sized tiles on each.
 
         Memory-aware chunking — before launching the full vmap, the
         method estimates peak memory usage.  If the full batch would exceed
@@ -486,18 +600,6 @@ class Script:
 
         Raises:
             ValueError: If ``len(in_axes) != len(args)``.
-
-        Note:
-            The ``jax.vmap`` call in :meth:`_build_plan` is the exact
-            boundary to replace with ``jax.shard_map`` for multi-device
-            execution::
-
-                from jax.sharding import PartitionSpec as P, Mesh
-                result = jax.shard_map(
-                    _single_execute, mesh=mesh,
-                    in_specs=tuple(P(0) if ax is not None else P() for ax in in_axes),
-                    out_specs=P(0),
-                )(*args)
         """
         if len(in_axes) != len(args):
             raise ValueError(
@@ -521,11 +623,10 @@ class Script:
         # ``plain_fn`` executable is gated off, as it cannot accept tracers.
         in_transform = self._args_contain_tracer(eff_args)
         # The plan's ``jit`` hides outer tracers from the simulation kernel, so
-        # forward-mode differentiation (no adjoint VJP) is detected here and
-        # baked into the plan.
-        forward_mode = simulation._forward_mode(
-            jax.tree_util.tree_leaves((eff_args, kwargs))
-        )
+        # the differentiation mode (no adjoint VJP under forward mode, larger
+        # tile working set under reverse mode) is detected here and baked into
+        # the plan.
+        ad_mode = simulation._ad_mode(jax.tree_util.tree_leaves((eff_args, kwargs)))
 
         # ``a.__class__`` (not ``type(a)``: ``type`` is shadowed by the
         # measurement-type parameter) keys non-array statics by their class.
@@ -570,7 +671,7 @@ class Script:
                     self._slice_first(a, ax) if ax is not None else a
                     for a, ax in zip(args, in_axes)
                 )
-                n_qubits, use_density = self._record_metadata(
+                n_qubits, use_density, _ = self._record_metadata(
                     scalar_args, kwargs, obs, type
                 )
 
@@ -597,7 +698,14 @@ class Script:
                     )
 
                 batched_fn = eqx.filter_jit(
-                    jax.vmap(_single_execute_shots, in_axes=shot_in_axes)
+                    _vectorize(
+                        _single_execute_shots,
+                        shot_in_axes,
+                        n_qubits,
+                        use_density,
+                        reverse=False,
+                        shard=True,
+                    )
                 )
                 plan = _BatchPlan(batched_fn, None, n_qubits, use_density)
                 self._jit_cache[shot_cache_key] = plan
@@ -628,7 +736,7 @@ class Script:
             gate_error,
             solver_defaults,
             has_init,
-            forward_mode,
+            ad_mode,
             fingerprint,
         )
 
@@ -648,7 +756,7 @@ class Script:
                 kwargs,
                 eff_in_axes,
                 has_initial_state=has_init,
-                adjoint=not forward_mode,
+                ad_mode=ad_mode,
             )
             self._jit_cache[cache_key] = plan
 
