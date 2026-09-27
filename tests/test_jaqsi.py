@@ -1921,7 +1921,7 @@ class TestChunk:
             UnitaryGates.batch_gate_error,
             make_hashable(Evolution._solver_defaults),
             False,  # has_init
-            False,  # forward_mode
+            None,  # ad_mode
             None,  # fingerprint
         )
         batched_fn, *_ = script._jit_cache[cache_key]
@@ -2060,7 +2060,7 @@ class TestChunk:
             UnitaryGates.batch_gate_error,
             make_hashable(Evolution._solver_defaults),
             False,  # has_init
-            False,  # forward_mode
+            None,  # ad_mode
             None,  # fingerprint
         )
         batched_fn, *_ = script2._jit_cache[cache_key]
@@ -2109,7 +2109,7 @@ class TestChunk:
             UnitaryGates.batch_gate_error,
             make_hashable(Evolution._solver_defaults),
             False,  # has_init
-            False,  # forward_mode
+            None,  # ad_mode
             None,  # fingerprint
         )
         batched_fn, *_ = script2._jit_cache[cache_key]
