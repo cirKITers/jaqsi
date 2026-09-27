@@ -489,8 +489,8 @@ def _outer_subscript(n: int, wires: Tuple[int, ...]) -> str:
     return f"{''.join(lam_idx)},{''.join(psi_idx)}->{letters[n : n + 2 * k]}"
 
 
-def _forward_mode(leaves) -> bool:
-    """Whether a forward-mode (``jvp``) trace reaches any of *leaves*.
+def _ad_mode(leaves) -> Optional[str]:
+    """The differentiation mode tracing any of *leaves*.
 
     ``jax.custom_vjp`` has no forward-mode rule, so the adjoint path must be
     skipped under ``jax.jvp``/``jax.jacfwd``.  Reverse mode (``jax.grad``,
@@ -500,16 +500,22 @@ def _forward_mode(leaves) -> bool:
     decides; batch and jit tracers are transparent.  A misclassification only
     costs the fast path, never correctness.  Tracers of a transform applied
     outside an enclosing ``jax.jit`` are not visible here.
+
+    Returns:
+        ``"forward"`` if any leaf is under forward mode, else ``"reverse"`` if
+        any is under reverse mode, else ``None``.
     """
+    mode = None
     for leaf in leaves:
         while isinstance(leaf, jax.core.Tracer):
             kind = type(leaf).__name__
             if kind == "JVPTracer":
-                return True
+                return "forward"
             if kind == "LinearizeTracer":
+                mode = "reverse"
                 break
             leaf = getattr(leaf, "primal", getattr(leaf, "val", None))
-    return False
+    return mode
 
 
 def _parameter(entry: Union[Gate, Diagonal]) -> jnp.ndarray:
@@ -534,7 +540,7 @@ def _parameters(plan: Sequence[Entry]) -> List[jnp.ndarray]:
 def _use_adjoint(tape: List[Operation], plan: Sequence[Entry], initial_state) -> bool:
     """Whether the adjoint VJP applies: every gate unitary, no forward-mode trace."""
     unitary = all(op.is_unitary for op in tape if not isinstance(op, Barrier))
-    return unitary and not _forward_mode(_parameters(plan) + [initial_state])
+    return unitary and _ad_mode(_parameters(plan) + [initial_state]) != "forward"
 
 
 def _adjoint_expval(
@@ -698,7 +704,7 @@ def simulate_and_measure(
             from.  When ``None`` (default), the all-zero state |00…0⟩ is used.
         adjoint: Allow the adjoint VJP.  :class:`~jaqsi.script.Script` passes
             ``False`` when it detects a forward-mode trace on the arguments
-            outside its own ``jit``, where :func:`_forward_mode` cannot see it.
+            outside its own ``jit``, where :func:`_ad_mode` cannot see it.
 
     Returns:
         Measurement result (shape depends on *type*).
