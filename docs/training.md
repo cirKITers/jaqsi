@@ -97,6 +97,18 @@ def mse(weights):
 `mse` is then optimized with exactly the same `step` function as above.
 For large batches `Script` also chunks the `vmap` automatically so that the peak memory
 stays within what is available (see `memory.py`).
+On CPU, it further runs the batch in tiles whose working set fits in the cache (`memory.CACHE_BYTES`, read from the L3 size; set it by hand on virtual machines, which may report a per-core cache that is actually shared).
+
+XLA's multi-threading barely speeds up a single circuit, but the samples of a batch are independent.
+To run them in parallel on CPU, expose the cores as JAX devices before JAX initialises:
+
+```python
+jax.config.update("jax_num_cpu_devices", 8)  # before the first JAX computation
+```
+
+`Script` then splits every batch whose size is a multiple of the device count over all devices, once a sample has at least `memory.SHARD_MIN_SIZE` amplitudes (a 10-qubit statevector by default; below that the dispatch costs more than it saves).
+Other batches run on one device.
+Gradients through pulse-level gates also stay on one device, since diffrax's ODE loop cannot be reverse-differentiated inside `jax.shard_map` yet.
 
 ## How gradients are computed
 
