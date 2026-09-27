@@ -51,9 +51,9 @@ def _vectorize(
     """Map *single* over the batch axes *in_axes*, like ``jax.vmap``.
 
     With *shard*, a batch that divides evenly over all ``jax.devices()`` is
-    split over them with ``jax.shard_map``, provided one sample holds at least
-    :data:`~jaqsi.memory.SHARD_MIN_SIZE` amplitudes; an uneven split would
-    replicate the output on every device.  Each device runs its part in tiles
+    split over them with ``jax.shard_map``, provided the batch holds at least
+    :data:`~jaqsi.memory.SHARD_MIN_SIZE` amplitudes in total; an uneven split
+    would replicate the output on every device.  Each device runs its part in tiles
     of :func:`~jaqsi.memory.tile_size` with ``jax.lax.map``, so the working set
     of a tile stays in cache.  The tiles are padded with copies of the last
     sample, so the kernel is compiled once rather than again for a remainder.
@@ -90,7 +90,7 @@ def _vectorize(
             not shard
             or len(devices) == 1
             or batch_size % len(devices)
-            or size < memory.SHARD_MIN_SIZE
+            or batch_size * size < memory.SHARD_MIN_SIZE
         ):
             return tiled(*args)
         mesh = Mesh(np.array(devices), ("batch",))
@@ -761,8 +761,16 @@ class Script:
             self._jit_cache[cache_key] = plan
 
         chunk_size = self._chunk_size(cache_key, plan, type, len(obs), batch_size)
+        # An AOT executable accepts only the input shardings it was compiled
+        # for, so they key it: an input split over the devices and a
+        # replicated one of the same shape each get their own.
+        shardings = (
+            None
+            if in_transform
+            else tuple(getattr(a, "sharding", None) for a in eff_args)
+        )
         return self._dispatch(
-            ("_aot", cache_key, batch_size),
+            ("_aot", cache_key, batch_size, shardings),
             plan.batched_fn,
             None if in_transform else plan.plain_fn,
             eff_args,
