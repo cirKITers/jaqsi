@@ -106,7 +106,7 @@ To run them in parallel on CPU, expose the cores as JAX devices before JAX initi
 jax.config.update("jax_num_cpu_devices", 8)  # before the first JAX computation
 ```
 
-`Script` then splits every batch whose size is a multiple of the device count over all devices, once a sample has at least `memory.SHARD_MIN_SIZE` amplitudes (a 10-qubit statevector by default; below that the dispatch costs more than it saves).
+`Script` then splits every batch whose size is a multiple of the device count over all devices, once the batch holds at least `memory.SHARD_MIN_SIZE` amplitudes in total (batch size times `2**n`, `2**13` by default; below that the dispatch costs more than it saves).
 Other batches run on one device.
 Gradients through pulse-level gates also stay on one device, since diffrax's ODE loop cannot be reverse-differentiated inside `jax.shard_map` yet.
 
