@@ -127,9 +127,10 @@ def test_tiled_shots(monkeypatch) -> None:
 def test_sharded_over_devices() -> None:
     """Four CPU devices against one sample at a time.
 
-    A batch of 8 is split over the devices, an uneven batch of 6 is not.  The
-    device count is fixed when JAX initialises, so this runs in a fresh
-    interpreter.
+    A batch of 8 is split over the devices; an uneven batch of 6 is not, and
+    neither is an even batch of 4, which holds fewer amplitudes than the
+    threshold.  The device count is fixed when JAX initialises, so this runs in
+    a fresh interpreter.
     """
     code = textwrap.dedent(
         """
@@ -138,9 +139,9 @@ def test_sharded_over_devices() -> None:
         from tests.test_batching import circuit, OBS, N, W
         from jaqsi import Script, memory
         assert len(jax.devices()) == 4
-        memory.SHARD_MIN_SIZE = 1
+        memory.SHARD_MIN_SIZE = 8 * 2**N
 
-        for batch_size, n_devices in ((8, 4), (6, 1)):
+        for batch_size, n_devices in ((8, 4), (6, 1), (4, 1)):
             x = jax.random.uniform(jax.random.PRNGKey(0), (batch_size, N))
 
             def loss(w):
@@ -159,6 +160,40 @@ def test_sharded_over_devices() -> None:
             assert jnp.allclose(
                 jax.jit(jax.grad(loss))(W), jax.grad(loss_single)(W), atol=1e-12
             )
+        """
+    )
+    env = dict(os.environ, JAX_NUM_CPU_DEVICES="4")
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.unittest
+def test_sharded_inputs_share_a_script() -> None:
+    """One ``Script`` called on the same shapes, placed differently.
+
+    An executable compiled ahead of time accepts only the shardings it was
+    compiled for, so an input split over the devices and a replicated one must
+    not share a cached executable.
+    """
+    code = textwrap.dedent(
+        """
+        import jax, jax.numpy as jnp
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+        jax.config.update("jax_enable_x64", True)
+        from tests.test_batching import circuit, OBS, N, W
+        from jaqsi import Script, memory
+        memory.SHARD_MIN_SIZE = 1
+
+        x = jax.random.uniform(jax.random.PRNGKey(0), (8, N))
+        mesh = Mesh(jax.devices(), ("batch",))
+        script = Script(circuit, n_qubits=N)
+        expected = script.execute("expval", OBS, args=(x, W), in_axes=(0, None))
+        for spec in (P("batch"), P()):
+            placed = jax.device_put(x, NamedSharding(mesh, spec))
+            got = script.execute("expval", OBS, args=(placed, W), in_axes=(0, None))
+            assert jnp.allclose(got, expected, atol=1e-12)
         """
     )
     env = dict(os.environ, JAX_NUM_CPU_DEVICES="4")
