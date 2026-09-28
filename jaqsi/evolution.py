@@ -346,6 +346,59 @@ class Evolution:
         return cls._store_evolve_solver(cache_key, _solve)
 
     @classmethod
+    def _build_closed_form_evolve_solver(
+        cls,
+        cache_key: tuple,
+        coeff_fn: Callable,
+        atol: float,
+        rtol: float,
+        max_steps: int,
+        throw: bool,
+        solver_name: str,
+        _rdtype,
+    ) -> Callable:
+        """Build and cache the solver for a single-term Hamiltonian ``f(p, t) H``.
+
+        Such a Hamiltonian commutes with itself at all times, so its propagator
+        is ``exp(-i F H)`` with ``F`` the integral of ``f`` over the pulse.  The
+        adaptive solver integrates the scalar ``F``, which takes as many steps as
+        the shape of ``f`` needs, while the matrix ODE needs more steps the
+        larger the rotation angle.
+        """
+        solver = diffrax.Dopri8() if solver_name == "dopri8" else diffrax.Dopri5()
+        stepsize_controller = diffrax.PIDController(atol=atol, rtol=rtol)
+
+        @eqx.filter_jit
+        def _solve(eigen, params, t0, t1):
+            """``eigen = (lam, V)`` holds the eigendecomposition of ``H``."""
+            lam, V = eigen
+            span = t1 - t0  # normalised time, as in the matrix ODE
+
+            def rhs(s, y, args):
+                return span * jnp.asarray(coeff_fn(args[0], t0 + s * span)).reshape(())
+
+            sol = diffrax.diffeqsolve(
+                diffrax.ODETerm(rhs),
+                solver,
+                t0=_rdtype(0.0),
+                t1=_rdtype(1.0),
+                dt0=None,
+                y0=jnp.zeros((), dtype=_rdtype),
+                args=params,
+                stepsize_controller=stepsize_controller,
+                max_steps=max_steps,
+                throw=throw,
+            )
+            U = (V * jnp.exp(-1j * sol.ys[0] * lam)) @ V.conj().T
+
+            if not throw:
+                successful = sol.result == diffrax.RESULTS.successful
+                U = jnp.where(successful, U, jnp.full_like(U, jnp.nan))
+            return U
+
+        return cls._store_evolve_solver(cache_key, _solve)
+
+    @classmethod
     def evolve(
         cls,
         hamiltonian: Union["Hermitian", "ParametrizedHamiltonian"],
@@ -451,6 +504,9 @@ class Evolution:
           ``einsum`` against the per-step coefficient vector
           ``c = [f_0(p_0,t), ..., f_{n-1}(p_{n-1},t)]``.
 
+        - A single term with a concrete matrix is solved in closed form by the
+          adaptive solvers, see :meth:`_build_closed_form_evolve_solver`.
+
         - The JIT-compiled solver is cached per coefficient-function code
           tuple (and ``dim``, tolerances) so multiple ``evolve()`` calls
           with the same pulse shape — but different Hamiltonian matrices
@@ -510,6 +566,16 @@ class Evolution:
             cls._parse_evolve_solver_options(odeint_kwargs)
         )
 
+        # A concrete single term is solved in closed form by the adaptive
+        # solvers.  Its eigenbasis is taken here, so that the unitary is
+        # differentiable in the pulse parameters alone: a traced
+        # eigendecomposition has no gradient at degenerate eigenvalues.
+        eigen = None
+        if n_terms == 1 and xp is np and solver_name in ("dopri8", "dopri5"):
+            np_cdtype = np.complex128 if jax.config.x64_enabled else np.complex64
+            lam, V = np.linalg.eigh(np.asarray(H_mats[0]))
+            eigen = (lam.astype(np_rdtype), V.astype(np_cdtype))
+
         # Cache key:  every coeff fn's code object (same shape of pulse
         # fns -> same JIT program) plus dim, tolerances, solver choice and
         # budget (different budgets mean different XLA programs); the
@@ -528,6 +594,7 @@ class Evolution:
             max_steps,
             solver_name,
             magnus_steps,
+            eigen is not None,
         )
 
         def solver_for(throw_flag: bool) -> Callable:
@@ -537,6 +604,17 @@ class Evolution:
                 _solve = cls._evolve_solver_cache.get(cache_key)
             if _solve is not None:
                 return _solve
+            if eigen is not None:
+                return cls._build_closed_form_evolve_solver(
+                    cache_key=cache_key,
+                    coeff_fn=coeff_fns[0],
+                    atol=atol,
+                    rtol=rtol,
+                    max_steps=max_steps,
+                    throw=throw_flag,
+                    solver_name=solver_name,
+                    _rdtype=_rdtype,
+                )
             if solver_name in ("magnus2", "magnus4"):
                 return cls._build_magnus_evolve_solver(
                     cache_key=cache_key,
@@ -612,7 +690,7 @@ class Evolution:
                 solver_for=solver_for,
                 throw=throw,
                 group_key=(base_key, throw, tuple(jnp.shape(p) for p in params)),
-                inputs=(neg_iH_split, params, t0, t1),
+                inputs=(neg_iH_split if eigen is None else eigen, params, t0, t1),
             )
 
         return _apply
