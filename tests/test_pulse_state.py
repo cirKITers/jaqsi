@@ -177,7 +177,7 @@ def test_host_offload_matches_and_reraises():
         assert jnp.allclose(state, ref_state, atol=1e-10)
         assert jnp.allclose(grad, ref_grad, atol=1e-8)
 
-        prev_steps = Evolution.set_solver_defaults(max_steps=4)
+        prev_steps = Evolution.set_solver_defaults(max_steps=1)
         try:
             with pytest.raises(RuntimeError):
                 Script(circuit, n_qubits=2).execute(type="state", args=(ws[0],))
@@ -209,3 +209,81 @@ def test_identical_pulse_gates_are_solved_once():
 
     traced(0.0)
     assert seen == [[1, 1]]
+
+
+def test_single_term_drive_is_solved_in_closed_form():
+    """A drive f(t) H commutes with itself, so U = exp(-i F H), F = int f dt.
+
+    For the RWA gaussian RY, F = w A sigma sqrt(2 pi) erf(T / (2 sqrt(2) sigma)) / 2
+    (envelope centre ``t / 2``).  The angle is far beyond pi, where the matrix
+    ODE needs hundreds of steps.
+    """
+    from jax.scipy.special import erf
+    from jaqsi.operations import Hermitian
+
+    PulseInformation.set_envelope("gaussian", rwa=True)
+    A, sigma, T = PulseInformation.RY.params
+    w = 60.0
+    H = PulseGates._coeff_RY_Y * Hermitian(PulseGates.Y, wires=0, record=False)
+    U = H.evolve()([jnp.array([A, sigma, w])], T).matrix
+
+    F = w * A * sigma * jnp.sqrt(2 * jnp.pi) * erf(T / (2 * jnp.sqrt(2) * sigma)) / 2
+    expected = jnp.cos(F) * jnp.eye(2) - 1j * jnp.sin(F) * PulseGates.Y
+    assert jnp.allclose(U, expected, atol=1e-8)
+
+
+def test_rwa_rotations_are_single_term():
+    """Under the RWA the off-axis component of RX and RY vanishes and is dropped."""
+    from jaqsi.evolution import PendingEvolution
+
+    def circuit(w):
+        PulseGates.RX(w, wires=0)
+        PulseGates.RY(w, wires=0)
+
+    for rwa, n_terms in ((True, 1), (False, 2)):
+        PulseInformation.set_rwa(rwa)
+        tape = Script(circuit, n_qubits=1).record(0.3)
+        ops = [op for op in tape if isinstance(op, PendingEvolution)]
+        assert [len(op._inputs[1]) for op in ops] == [n_terms, n_terms]
+
+
+def test_closed_form_matches_matrix_ode():
+    """States and pulse-parameter gradients agree with the matrix ODE.
+
+    The two-term RWA drive (zero off-axis coefficient) still takes the matrix
+    ODE.  CZ has a degenerate spectrum, where a traced eigendecomposition
+    would give NaN gradients.
+    """
+    from jaqsi.gateset import PauliZ
+    from jaqsi.operations import Hermitian
+
+    X = Hermitian(PulseGates.X, wires=0, record=False)
+    Y = Hermitian(PulseGates.Y, wires=0, record=False)
+
+    def circuit(w, pp, cz, two_term):
+        if two_term:
+            H = PulseGates._coeff_RY_X * X + PulseGates._coeff_RY_Y * Y
+        else:
+            H = PulseGates._coeff_RY_Y * Y
+        p = jnp.concatenate([pp[:-1], jnp.atleast_1d(w)])
+        H.evolve()([p] * H.n_terms, pp[-1])
+        PulseGates.RX(w / 3, wires=1)
+        PulseGates.CZ(wires=[0, 1], pulse_params=cz)
+        PulseGates.RY(w / 2, wires=1)
+
+    def expval(w, pp, cz, two_term):
+        script = Script(circuit, n_qubits=2)
+        obs = [PauliZ(wires=0), PauliZ(wires=1)]
+        out = script.execute("expval", obs, args=(w, pp, cz, two_term))
+        return out.sum()
+
+    pp, cz = PulseInformation.RY.params, PulseInformation.CZ.params
+    for w in (0.4, 25.0):
+        closed = jax.grad(expval, argnums=(0, 1, 2))(w, pp, cz, False)
+        ode = jax.grad(expval, argnums=(0, 1, 2))(w, pp, cz, True)
+        assert jnp.allclose(
+            expval(w, pp, cz, False), expval(w, pp, cz, True), atol=1e-8
+        )
+        for g_closed, g_ode in zip(closed, ode):
+            assert jnp.all(jnp.isfinite(g_closed))
+            assert jnp.allclose(g_closed, g_ode, atol=1e-6)
