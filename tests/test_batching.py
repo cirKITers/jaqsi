@@ -70,6 +70,65 @@ def test_tile_size_fits() -> None:
 
 
 @pytest.mark.unittest
+def test_tile_size_counts_pulse_solves(small_cache, monkeypatch) -> None:
+    """Pulse solves are held to their own budget, the statevectors to theirs."""
+    monkeypatch.setattr(memory, "SOLVE_CACHE_BYTES", 1000)
+    assert memory.tile_size(N, B, False, False, solve_bytes=250) == 2
+    assert memory.tile_size(N, B, False, False, solve_bytes=500) == 2
+    assert memory.tile_size(N, B, False, False, solve_bytes=1000) == 1
+
+
+@pytest.mark.unittest
+def test_pulse_scratch_is_the_largest_group() -> None:
+    """Groups are solved one after another, so the largest one counts."""
+    from jaqsi.evolution import scratch_bytes
+    from jaqsi.pulses import PulseGates
+
+    def pulse_circuit(x):
+        for i in range(N):
+            PulseGates.RY(x * (i + 1), wires=i)
+        PulseGates.CZ(wires=[0, 1])
+
+    tape = Script(pulse_circuit, n_qubits=N).record(0.3)
+    ry = memory.solve_bytes(2, "dopri8", closed_form=True)
+    cz = memory.solve_bytes(4, "dopri8", closed_form=True)
+    assert scratch_bytes(tape) == max(N * ry, cz)
+    assert memory.solve_bytes(2, "dopri8", closed_form=False) > ry
+
+
+@pytest.mark.unittest
+def test_pulse_solves_size_the_tile(monkeypatch) -> None:
+    """A pulse circuit is tiled by its solves, with unchanged results."""
+    from jaqsi.pulses import PulseGates
+
+    def pulse_circuit(x, w):
+        for i in range(N):
+            PulseGates.RY(x[i], wires=i)
+        PulseGates.CZ(wires=[0, 1])
+        for i in range(N):
+            PulseGates.RX(w[i], wires=i)
+
+    def run_pulse():
+        return Script(pulse_circuit, n_qubits=N).execute(
+            type="expval", obs=OBS, args=(X, W), in_axes=(0, None)
+        )
+
+    expected = run_pulse()
+    seen = []
+    tile_size = memory.tile_size
+
+    def recorded(*args, **kwargs):
+        seen.append(kwargs["solve_bytes"])
+        return tile_size(*args, **kwargs)
+
+    solves = N * memory.solve_bytes(2, "dopri8", closed_form=True)
+    monkeypatch.setattr(memory, "tile_size", recorded)
+    monkeypatch.setattr(memory, "SOLVE_CACHE_BYTES", 2 * solves)  # tiles of 2
+    assert jnp.allclose(run_pulse(), expected, atol=1e-12)
+    assert seen == [solves]
+
+
+@pytest.mark.unittest
 def test_ad_mode() -> None:
     seen = []
 
