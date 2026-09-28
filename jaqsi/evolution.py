@@ -24,6 +24,7 @@ import jax.scipy.linalg
 from jax.experimental.compute_on import compute_on
 import equinox as eqx
 
+from jaqsi import memory
 from jaqsi.operations import (
     Hermitian,
     ParametrizedHamiltonian,
@@ -575,6 +576,7 @@ class Evolution:
             np_cdtype = np.complex128 if jax.config.x64_enabled else np.complex64
             lam, V = np.linalg.eigh(np.asarray(H_mats[0]))
             eigen = (lam.astype(np_rdtype), V.astype(np_cdtype))
+        solve_bytes = memory.solve_bytes(dim, solver_name, eigen is not None)
 
         # Cache key:  every coeff fn's code object (same shape of pulse
         # fns -> same JIT program) plus dim, tolerances, solver choice and
@@ -691,6 +693,7 @@ class Evolution:
                 throw=throw,
                 group_key=(base_key, throw, tuple(jnp.shape(p) for p in params)),
                 inputs=(neg_iH_split if eigen is None else eigen, params, t0, t1),
+                scratch_bytes=solve_bytes,
             )
 
         return _apply
@@ -718,12 +721,14 @@ class PendingEvolution(Operation):
         throw: bool,
         group_key: tuple,
         inputs: tuple,
+        scratch_bytes: int,
     ) -> None:
         super().__init__(wires=wires, name=name)
         self._solver_for = solver_for
         self._throw = throw
         self._group_key = group_key
         self._inputs = inputs
+        self._scratch_bytes = scratch_bytes  # per sample, see memory.solve_bytes
 
     @property
     def matrix(self) -> jnp.ndarray:
@@ -747,13 +752,8 @@ def resolve_pending(tape: List[Operation]) -> List[int]:
     Returns:
         Number of distinct solves per batched call.
     """
-    groups: Dict[tuple, List[PendingEvolution]] = {}
-    for op in tape:
-        if isinstance(op, PendingEvolution) and op._matrix is None:
-            groups.setdefault(op._group_key, []).append(op)
-
     sizes = []
-    for group in groups.values():
+    for group in _pending_groups(tape):
         # Identical gates (a repeated fixed-angle rotation, the same CZ on
         # several wire pairs) are solved once.  XLA deduplicated them across
         # sequential solves; stacked copies it cannot.
@@ -781,6 +781,28 @@ def resolve_pending(tape: List[Operation]) -> List[int]:
                 op._matrix = U[i]
 
     return sizes
+
+
+def _pending_groups(tape: List[Operation]) -> List[List[PendingEvolution]]:
+    """Unresolved pulse gates of *tape*, grouped by the solve they share."""
+    groups: Dict[tuple, List[PendingEvolution]] = {}
+    for op in tape:
+        if isinstance(op, PendingEvolution) and op._matrix is None:
+            groups.setdefault(op._group_key, []).append(op)
+    return list(groups.values())
+
+
+def scratch_bytes(tape: List[Operation]) -> int:
+    """Working set per sample of solving the pulse gates of *tape* in a batch.
+
+    :func:`resolve_pending` solves the groups one after another, so the largest
+    group sets it.  Every gate is counted as if it depended on the batch; the
+    others are solved once and cost less.
+    """
+    return max(
+        (sum(op._scratch_bytes for op in g) for g in _pending_groups(tape)),
+        default=0,
+    )
 
 
 def _on_host(fn: Callable) -> Callable:

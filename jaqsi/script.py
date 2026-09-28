@@ -11,7 +11,7 @@ from jaqsi.noise import KrausChannel
 from jaqsi.tape import recording, pulse_recording
 from jaqsi.drawing import draw_text, draw_mpl, draw_tikz
 from jaqsi.unitary import UnitaryGates
-from jaqsi.evolution import Evolution, PendingEvolution
+from jaqsi.evolution import Evolution, scratch_bytes
 from jaqsi import simulation, memory
 
 
@@ -47,6 +47,7 @@ def _vectorize(
     use_density: bool,
     reverse: bool,
     shard: bool,
+    solve_bytes: int = 0,
 ) -> Callable:
     """Map *single* over the batch axes *in_axes*, like ``jax.vmap``.
 
@@ -55,14 +56,17 @@ def _vectorize(
     :data:`~jaqsi.memory.SHARD_MIN_SIZE` amplitudes in total; an uneven split
     would replicate the output on every device.  Each device runs its part in tiles
     of :func:`~jaqsi.memory.tile_size` with ``jax.lax.map``, so the working set
-    of a tile stays in cache.  The tiles are padded with copies of the last
+    of a tile, including *solve_bytes* per sample for the pulse solves, stays in
+    cache.  The tiles are padded with copies of the last
     sample, so the kernel is compiled once rather than again for a remainder.
     With one device and a batch that fits, this is a plain ``jax.vmap``.
     """
 
     def tiled(*args):
         batch_size = Script._batch_size(args, in_axes)
-        tile = memory.tile_size(n_qubits, batch_size, use_density, reverse)
+        tile = memory.tile_size(
+            n_qubits, batch_size, use_density, reverse, solve_bytes=solve_bytes
+        )
         if tile >= batch_size:
             return jax.vmap(single, in_axes=in_axes)(*args)
         pad = -batch_size % tile
@@ -380,21 +384,21 @@ class Script:
 
     def _record_metadata(
         self, scalar_args: tuple, kwargs: dict, obs: List[Operation], type: str
-    ) -> Tuple[int, bool, bool]:
+    ) -> Tuple[int, bool, int]:
         """Trace the tape from scalar slices to derive batch-invariant metadata.
 
         Recording once with scalar slices determines ``n_qubits``, whether
-        noise channels are present (forcing density-matrix simulation) and
-        whether pulse gates are solved by an ODE solver, without running the
-        full batch.
+        noise channels are present (forcing density-matrix simulation) and the
+        working set of the pulse solves (see
+        :func:`~jaqsi.evolution.scratch_bytes`), without running the full batch.
 
         Returns:
-            ``(n_qubits, use_density, has_pulses)``.
+            ``(n_qubits, use_density, solve_bytes)``, *solve_bytes* zero without
+            pulse gates.
         """
         tape = self.record(*scalar_args, **kwargs)
         n_qubits = self._n_qubits or simulation.infer_n_qubits(tape, obs)
-        has_pulses = any(isinstance(op, PendingEvolution) for op in tape)
-        return n_qubits, simulation.has_noise(tape), has_pulses
+        return n_qubits, simulation.has_noise(tape), scratch_bytes(tape)
 
     def _build_plan(
         self,
@@ -430,7 +434,7 @@ class Script:
         )
         # The trailing scalar is the initial state, not a circuit argument.
         record_args = scalar_args[:-1] if has_initial_state else scalar_args
-        n_qubits, use_density, has_pulses = self._record_metadata(
+        n_qubits, use_density, solve_bytes = self._record_metadata(
             record_args, kwargs, obs, type
         )
 
@@ -464,7 +468,8 @@ class Script:
             n_qubits,
             use_density,
             reverse,
-            shard=not (reverse and has_pulses),
+            shard=not (reverse and solve_bytes > 0),
+            solve_bytes=solve_bytes,
         )
 
         # Wrapping the vmapped function in eqx.filter_jit: (1) treats non-array
@@ -676,7 +681,7 @@ class Script:
                     self._slice_first(a, ax) if ax is not None else a
                     for a, ax in zip(args, in_axes)
                 )
-                n_qubits, use_density, _ = self._record_metadata(
+                n_qubits, use_density, solve_bytes = self._record_metadata(
                     scalar_args, kwargs, obs, type
                 )
 
@@ -710,6 +715,7 @@ class Script:
                         use_density,
                         reverse=False,
                         shard=True,
+                        solve_bytes=solve_bytes,
                     )
                 )
                 plan = _BatchPlan(batched_fn, None, n_qubits, use_density)

@@ -51,6 +51,14 @@ def _cache_bytes_per_cpu(default: int = 8 * 1024**2) -> int:
 # Cache budget for one batch tile, see :func:`tile_size`.
 CACHE_BYTES: int = _cache_bytes_per_cpu()
 
+# Budget for the pulse solves of one batch tile, see :func:`tile_size`.  Their
+# loops run hundreds of small operations per step, which XLA splits over its
+# intra-op threads once a tile is large enough, at a cost.  Three RY solves per
+# sample, 432,000 samples, 16-vCPU VM: 1 MiB instead of 256 KiB costs 1.25x for
+# one unpinned process and 2x for 16 at once; from 32 KiB to 512 KiB the time
+# stays within 10 %.  256 KiB also fits the private L2 of current cores.
+SOLVE_CACHE_BYTES: int = 256 * 1024
+
 # Amplitudes per batch (batch size times ``2**n`` for statevectors, ``4**n``
 # for density matrices) below which a batch is not split over devices: under
 # it, the dispatch to each device costs more than the split saves.  The
@@ -269,7 +277,33 @@ def compute_chunk_size(
     return chunk
 
 
-def tile_size(n_qubits: int, batch_size: int, use_density: bool, reverse: bool) -> int:
+# Live copies of the solver state in one batched pulse solve, from XLA's
+# compiled peak (CPU, JAX 0.11): the stages, error estimate and step
+# temporaries of the Dormand-Prince solvers, the exponentials of a Magnus step.
+_SOLVE_COPIES = {"dopri8": 36, "dopri5": 22, "magnus2": 26, "magnus4": 26}
+
+
+def solve_bytes(dim: int, solver: str, closed_form: bool) -> int:
+    """Working set per sample of one batched pulse solve.
+
+    The solver state is the real-split ``dim x dim`` unitary, or the scalar
+    integral of a closed-form solve (see
+    :meth:`~jaqsi.evolution.Evolution._build_closed_form_evolve_solver`).  The
+    solved unitary adds ``2 * dim**2`` reals either way.  Within 20 % of the
+    compiled peak for ``dim`` 2 and 4.
+    """
+    _, real_elem = _element_sizes()
+    state = 1 if closed_form else 2 * dim * dim
+    return (_SOLVE_COPIES[solver] * state + 2 * dim * dim) * real_elem
+
+
+def tile_size(
+    n_qubits: int,
+    batch_size: int,
+    use_density: bool,
+    reverse: bool,
+    solve_bytes: int = 0,
+) -> int:
     """Batch tile whose working set fits in :data:`CACHE_BYTES`.
 
     Every gate streams the whole batched state through memory, so once the live
@@ -277,8 +311,15 @@ def tile_size(n_qubits: int, batch_size: int, use_density: bool, reverse: bool) 
     batch in tiles that fit keeps them cache-resident.  The live buffers are the
     compiled scratch of :func:`estimate_peak_bytes`: two statevectors for a
     forward pass, eight when the adjoint gradient is taken (*reverse*), and five
-    density matrices.  Tiles are balanced, so ``batch_size`` splits into
-    near-equal parts.  Only the CPU backend is tiled.
+    density matrices.
+
+    The pulse solves, *solve_bytes* per sample (see
+    :func:`~jaqsi.evolution.scratch_bytes`), are held to their own, smaller
+    budget, :data:`SOLVE_CACHE_BYTES`, since their loops lose to XLA's
+    intra-op threading before they outgrow the cache.
+
+    Tiles are balanced, so ``batch_size`` splits into near-equal parts.  Only
+    the CPU backend is tiled.
 
     Returns:
         Tile size, ``batch_size`` when the batch fits or no tiling applies.
@@ -291,7 +332,10 @@ def tile_size(n_qubits: int, batch_size: int, use_density: bool, reverse: bool) 
         per_elem = 5 * dim * dim * elem
     else:
         per_elem = (8 if reverse else 2) * dim * elem
-    fit = max(1, CACHE_BYTES // per_elem)
+    fit = CACHE_BYTES // per_elem
+    if solve_bytes:
+        fit = min(fit, SOLVE_CACHE_BYTES // solve_bytes)
+    fit = max(1, fit)
     n_tiles = -(-batch_size // fit)
     return -(-batch_size // n_tiles)
 
