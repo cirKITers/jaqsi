@@ -86,12 +86,18 @@ class Evolution:
     # call and loses above; hence opt-in.  Works for forward simulation
     # under ``jit``/``vmap`` and for an eager ``jax.grad``; XLA (jax 0.9)
     # fails to compile the offloaded loop inside ``jax.jit(jax.grad(...))``.
+    #
+    # ``closed_form`` lets the adaptive solvers integrate only the scalar
+    # pulse area of a single-term drive with a concrete matrix (see
+    # :meth:`_build_closed_form_evolve_solver`).  Switching it off integrates
+    # such drives as a matrix ODE like every other Hamiltonian.
     _solver_defaults: dict = {
         "max_steps": 2**13,
         "throw": True,
         "solver": "dopri8",
         "magnus_steps": 256,
         "host_offload": False,
+        "closed_form": True,
     }
     _valid_solvers = ("dopri8", "dopri5", "magnus2", "magnus4")
 
@@ -103,6 +109,7 @@ class Evolution:
         solver: Optional[str] = None,
         magnus_steps: Optional[int] = None,
         host_offload: Optional[bool] = None,
+        closed_form: Optional[bool] = None,
     ) -> dict:
         """Update class-level solver defaults; return the previous values.
 
@@ -117,6 +124,8 @@ class Evolution:
             host_offload: Solve the pulse ODEs on the host CPU while the
                 circuit runs on the accelerator (ignored if ``None``).  Not
                 supported inside ``jax.jit(jax.grad(...))``.
+            closed_form: Solve single-term drives in closed form (ignored if
+                ``None``).  ``False`` integrates them as a matrix ODE.
 
         Returns:
             Dictionary with the previous values of the updated keys.
@@ -141,6 +150,9 @@ class Evolution:
         if host_offload is not None:
             prev["host_offload"] = cls._solver_defaults["host_offload"]
             cls._solver_defaults["host_offload"] = bool(host_offload)
+        if closed_form is not None:
+            prev["closed_form"] = cls._solver_defaults["closed_form"]
+            cls._solver_defaults["closed_form"] = bool(closed_form)
         return prev
 
     @classmethod
@@ -185,7 +197,10 @@ class Evolution:
         magnus_steps = int(
             odeint_kwargs.pop("magnus_steps", cls._solver_defaults["magnus_steps"])
         )
-        return atol, rtol, max_steps, throw, solver_name, magnus_steps
+        closed_form = bool(
+            odeint_kwargs.pop("closed_form", cls._solver_defaults["closed_form"])
+        )
+        return atol, rtol, max_steps, throw, solver_name, magnus_steps, closed_form
 
     @classmethod
     def _build_magnus_evolve_solver(
@@ -535,6 +550,10 @@ class Evolution:
                   raising; this is the recommended setting for inner
                   loops of an optimiser (e.g. QOC Stage 0) so a single
                   pathological candidate cannot abort the whole run.
+                - ``closed_form`` — whether a single term with a concrete
+                  matrix is solved in closed form (default
+                  :attr:`cls._solver_defaults['closed_form']`, currently
+                  ``True``).  ``False`` integrates it as a matrix ODE.
         """
         coeff_fns = ph.coeff_fns  # tuple of callables
         H_mats = ph.H_mats  # tuple of (dim, dim)
@@ -563,7 +582,7 @@ class Evolution:
             neg_iH_split = neg_iH_split.astype(np_rdtype)
 
         # Pick tolerances according to precision + some headroom
-        atol, rtol, max_steps, throw, solver_name, magnus_steps = (
+        atol, rtol, max_steps, throw, solver_name, magnus_steps, closed_form = (
             cls._parse_evolve_solver_options(odeint_kwargs)
         )
 
@@ -572,7 +591,12 @@ class Evolution:
         # differentiable in the pulse parameters alone: a traced
         # eigendecomposition has no gradient at degenerate eigenvalues.
         eigen = None
-        if n_terms == 1 and xp is np and solver_name in ("dopri8", "dopri5"):
+        if (
+            closed_form
+            and n_terms == 1
+            and xp is np
+            and solver_name in ("dopri8", "dopri5")
+        ):
             np_cdtype = np.complex128 if jax.config.x64_enabled else np.complex64
             lam, V = np.linalg.eigh(np.asarray(H_mats[0]))
             eigen = (lam.astype(np_rdtype), V.astype(np_cdtype))

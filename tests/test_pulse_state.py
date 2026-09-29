@@ -232,6 +232,32 @@ def test_single_term_drive_is_solved_in_closed_form():
     assert jnp.allclose(U, expected, atol=1e-8)
 
 
+def test_closed_form_can_be_switched_off():
+    """``closed_form=False`` integrates a single-term drive as a matrix ODE.
+
+    The closed form carries the eigendecomposition of ``H`` as solver input,
+    the matrix ODE the split ``-iH`` of shape ``(n_terms, 2, dim, dim)``.
+    """
+    from jaqsi.operations import Hermitian
+
+    PulseInformation.set_envelope("gaussian", rwa=True)
+    A, sigma, T = PulseInformation.RY.params
+    H = PulseGates._coeff_RY_Y * Hermitian(PulseGates.Y, wires=0, record=False)
+    params = [jnp.array([A, sigma, 2.0])]
+
+    closed = H.evolve()(params, T)
+    ode = H.evolve(closed_form=False)(params, T)
+    assert isinstance(closed._inputs[0], tuple)
+    assert ode._inputs[0].shape == (1, 2, 2, 2)
+    assert jnp.allclose(ode.matrix, closed.matrix, atol=1e-8)
+
+    prev = Evolution.set_solver_defaults(closed_form=False)
+    try:
+        assert H.evolve()(params, T)._inputs[0].shape == (1, 2, 2, 2)
+    finally:
+        Evolution.set_solver_defaults(**prev)
+
+
 def test_rwa_rotations_are_single_term():
     """Under the RWA the off-axis component of RX and RY vanishes and is dropped."""
     from jaqsi.evolution import PendingEvolution
