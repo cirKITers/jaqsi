@@ -472,7 +472,10 @@ def spectral_density_cost_fn(
     Samples the pulse envelope in the time domain over ``[0, t_evol]``
     (where ``t_evol`` is the last element of pulse_params), computes its
     power spectral density via FFT, and returns the normalised RMS bandwidth
-    (square root of the second central moment of the PSD).
+    (square root of the second central moment of the PSD).  For
+    two-quadrature envelopes (DRAG) the PSDs of both quadratures add, which
+    is the PSD of the complex envelope ``E + iQ`` folded onto non-negative
+    frequencies.
 
     Pulses with narrow spectra (e.g. Gaussian, DRAG) receive a low cost,
     whereas pulses with wide spectra (e.g. rectangular) are penalised more
@@ -496,6 +499,7 @@ def spectral_density_cost_fn(
     envelope_info = PulseEnvelope.get(envelope)
     n_envelope_params = envelope_info["n_envelope_params"]
     envelope_fn = envelope_info["fn"]
+    quadrature_fn = envelope_info.get("quadrature_fn")
 
     # Nothing to penalise for envelopes without tuneable shape params
     if n_envelope_params == 0 or envelope_fn is None:
@@ -511,6 +515,9 @@ def spectral_density_cost_fn(
 
     spectrum = jnp.fft.rfft(signal)
     psd = jnp.abs(spectrum) ** 2
+    if quadrature_fn is not None:
+        quad = jax.vmap(lambda t: quadrature_fn(env_params, t, t_c))(t_samples)
+        psd = psd + jnp.abs(jnp.fft.rfft(quad)) ** 2
     psd = psd / (jnp.sum(psd) + 1e-12)  # normalise to a distribution
 
     freqs = jnp.linspace(0.0, 1.0, len(psd))
@@ -2609,7 +2616,7 @@ class QOC:
 
 
 default_qoc_params = {
-    "envelope": "drag",
+    "envelope": PulseInformation.DEFAULT_ENVELOPE,
     "cost_fns": [
         # Unitary-level cost (process infidelity + trace-phase term).
         # Captures rotation-axis tilt and global-phase residual that

@@ -514,6 +514,8 @@ class PulseEvent:
         duration: Pulse duration (evolution time).
         carrier_phase: Phase offset for the carrier cosine.
         parent: Optional high-level gate name that decomposed into this event.
+        quadrature_fn: Quadrature envelope ``(p, t, t_c) -> amplitude`` of a
+            two-quadrature envelope (DRAG), ``None`` otherwise.
     """
 
     gate: str
@@ -524,6 +526,7 @@ class PulseEvent:
     duration: float  # evolution time
     carrier_phase: float = 0.0  # phi_c in cos(omega_c * t + phi_c)
     parent: Optional[str] = None  # composite gate that owns this pulse
+    quadrature_fn: Any = None  # (p, t, t_c) -> scalar, DRAG only
 
 
 # Leaf gate metadata for pulse schedule drawing.
@@ -601,6 +604,7 @@ def collect_pulse_events(
                     duration=dur,
                     carrier_phase=meta["carrier_phase"],
                     parent=parent_label,
+                    quadrature_fn=info.get("quadrature_fn"),
                 )
             ]
         else:
@@ -728,6 +732,18 @@ def _draw_physical_pulse(
         ax = axes[wire]
         ax.fill_between(t_display, signal, alpha=0.12, color=color, zorder=2)
         ax.plot(t_display, signal, color=color, linewidth=1.4, alpha=0.85, zorder=3)
+        if ev.quadrature_fn is not None:
+            # DRAG: the quadrature control on the orthogonal carrier
+            quad = ev.quadrature_fn(ev.envelope_params, t_arr, ev.duration / 2)
+            ax.plot(
+                t_display,
+                quad * ev.w,
+                color=color,
+                linestyle=":",
+                linewidth=1.2,
+                alpha=0.85,
+                zorder=3,
+            )
 
         # Mark evolution window boundaries with visible dashed lines
         for t_edge in (t_start, t_start + ev.duration):
