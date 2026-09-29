@@ -82,7 +82,10 @@ def test_tile_size_counts_pulse_solves(small_cache, monkeypatch) -> None:
 def test_pulse_scratch_is_the_largest_group() -> None:
     """Groups are solved one after another, so the largest one counts."""
     from jaqsi.evolution import scratch_bytes
-    from jaqsi.pulses import PulseGates
+    from jaqsi.pulses import PulseGates, PulseInformation
+
+    # A single-quadrature envelope, whose rotations are solved in closed form.
+    PulseInformation.set_envelope("gaussian")
 
     def pulse_circuit(x):
         for i in range(N):
@@ -99,7 +102,10 @@ def test_pulse_scratch_is_the_largest_group() -> None:
 @pytest.mark.unittest
 def test_pulse_solves_size_the_tile(monkeypatch) -> None:
     """A pulse circuit is tiled by its solves, with unchanged results."""
-    from jaqsi.pulses import PulseGates
+    from jaqsi.pulses import PulseGates, PulseInformation
+
+    # A single-quadrature envelope, whose rotations are solved in closed form.
+    PulseInformation.set_envelope("gaussian")
 
     def pulse_circuit(x, w):
         for i in range(N):

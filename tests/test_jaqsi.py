@@ -2334,15 +2334,24 @@ class TestPulse:
         assert val_off_center < val_at_center
 
     @pytest.mark.unittest
-    def test_pulse_envelope_drag_reduces_to_gaussian(self):
-        """DRAG with beta=0 reduces to Gaussian."""
-        A, sigma = 2.0, 1.0
+    def test_pulse_envelope_drag_quadratures(self):
+        """DRAG drives a Gaussian in phase and ``-beta dE/dt`` in quadrature.
+
+        The derivative is taken at the fixed pulse centre ``t_c``; with
+        beta=0 only the Gaussian remains.
+        """
+        A, beta, sigma = 2.0, 0.3, 1.0
         p_gauss = jnp.array([A, sigma])
-        p_drag = jnp.array([A, 0.0, sigma])
+        p_drag = jnp.array([A, beta, sigma])
         t, t_c = 0.3, 0.5
         g = PulseEnvelope.gaussian(p_gauss, t, t_c)
         d = PulseEnvelope.drag(p_drag, t, t_c)
         assert jnp.isclose(g, d, atol=1e-10)
+
+        dE = jax.grad(lambda s: PulseEnvelope.drag(p_drag, s, t_c))(t)
+        q = PulseEnvelope.drag_quadrature(p_drag, t, t_c)
+        assert jnp.isclose(q, -beta * dE, atol=1e-10)
+        assert PulseEnvelope.drag_quadrature(p_drag.at[1].set(0.0), t, t_c) == 0.0
 
     @pytest.mark.unittest
     def test_build_coeff_fns_unique_code(self):
@@ -2353,10 +2362,15 @@ class TestPulse:
             PulseEnvelope.gaussian, omega_c, omega_q, rwa=False, frame="lab"
         )
         rxx_d, rxy_d, ryx_d, ryy_d = PulseEnvelope.build_coeff_fns(
-            PulseEnvelope.drag, omega_c, omega_q, rwa=False, frame="lab"
+            PulseEnvelope.drag,
+            omega_c,
+            omega_q,
+            rwa=False,
+            frame="lab",
+            quadrature_fn=PulseEnvelope.drag_quadrature,
         )
-        p_gauss = jnp.array([1.0, 1.0, 1.0])  # [A, sigma, w]
-        p_drag = jnp.array([1.0, 0.5, 1.0, 1.0])  # [A, beta, sigma, w]
+        p_gauss = jnp.array([1.0, 1.0, 1.0, 1.0])  # [A, sigma, T, w]
+        p_drag = jnp.array([1.0, 0.5, 1.0, 1.0, 1.0])  # [A, beta, sigma, T, w]
         t = 0.123
         # Different envelopes → different coefficient values
         assert not jnp.allclose(rxx_g(p_gauss, t), rxx_d(p_drag, t))
@@ -2500,7 +2514,7 @@ class TestPulse:
             # The coefficient functions must be different objects
             assert sx_gaussian is not sx_sech
             # And produce different numerical results
-            p = jnp.array([1.0, 1.0, 1.0])  # [A, sigma, w]
+            p = jnp.array([1.0, 1.0, 1.0, 1.0])  # [A, sigma, T, w]
             t = 0.3
             assert not jnp.allclose(sx_gaussian(p, t), sx_sech(p, t))
         finally:
@@ -2569,7 +2583,7 @@ class TestPulse:
             PulseEnvelope.gaussian, omega_c, omega_q, rwa=True
         )
 
-        p = jnp.array([1.0, 0.5, 1.0])  # [A, sigma, w]
+        p = jnp.array([1.0, 0.5, 1.0, 1.0])  # [A, sigma, T, w]
         # Time at which the carrier vanishes (cos(omega_c t) = 0).
         t_zero = jnp.pi / (2 * omega_c)
         # Reference time at which envelope and carrier are positive.
@@ -2580,8 +2594,8 @@ class TestPulse:
         assert jnp.isclose(rxy_exact(p, t_zero), 0.0, atol=1e-10)
         # RWA form does not (envelope is finite at t_zero).
         assert jnp.abs(rxx_rwa(p, t_zero)) > 1e-3
-        # And RWA equals the closed-form ``0.5 * env(p, t, t/2) * w``.
-        env_val = PulseEnvelope.gaussian(p, t_ref, t_ref / 2)
+        # And RWA equals the closed-form ``0.5 * env(p, t, T/2) * w``.
+        env_val = PulseEnvelope.gaussian(p, t_ref, p[-2] / 2)
         assert jnp.isclose(rxx_rwa(p, t_ref), 0.5 * env_val * p[-1], atol=1e-10)
         assert jnp.isclose(ryy_rwa(p, t_ref), 0.5 * env_val * p[-1], atol=1e-10)
         # Off-diagonal RWA components are identically zero.
@@ -2609,11 +2623,11 @@ class TestPulse:
             w = 1.0
             pp = jnp.array([A, sigma, t_g])
 
-            # Closed-form area of env(τ) = A·exp(-(τ/2)^2/(2 sigma^2))
+            # Closed-form area of env(τ) = A·exp(-(τ - t_g/2)^2/(2 sigma^2))
             # over [0, t_g] via dense trapezoid (no JAX needed).
             ts = jnp.linspace(0.0, t_g, 2048)
             env_vals = jax.vmap(
-                lambda tau: PulseEnvelope.gaussian(jnp.array([A, sigma]), tau, tau / 2)
+                lambda tau: PulseEnvelope.gaussian(jnp.array([A, sigma]), tau, t_g / 2)
             )(ts)
             area = jnp.trapezoid(env_vals, ts)
             theta_eff = float(w * area)
@@ -2677,7 +2691,7 @@ class TestPulse:
 
             w = float(jnp.pi / 2)
             t_g = float(flat[-1])
-            args = [jnp.array([*flat[:-1], w])] * 2
+            args = [jnp.array([*flat, w])] * 2
 
             U_ref = Evolution.evolve(H_eff, name="RX", atol=1e-12, rtol=1e-12)(
                 args, t_g
@@ -2717,7 +2731,7 @@ class TestPulse:
             H_eff = PulseGates._coeff_RX_X * H_X + PulseGates._coeff_RX_Y * H_Y
             w = float(jnp.pi / 2)
             t_g = float(flat[-1])
-            args = [jnp.array([*flat[:-1], w])] * 2
+            args = [jnp.array([*flat, w])] * 2
             U_ref = Evolution.evolve(H_eff, name="RX", atol=1e-12, rtol=1e-12)(
                 args, t_g
             ).matrix
@@ -2764,12 +2778,22 @@ class TestPulse:
 
         for omega_c, omega_q in [(1.234, 1.234), (1.5, 1.0), (3.0, 7.0)]:
             lab = PulseEnvelope.build_coeff_fns(
-                PulseEnvelope.drag, omega_c, omega_q, frame="lab"
+                PulseEnvelope.drag,
+                omega_c,
+                omega_q,
+                rwa=False,
+                frame="lab",
+                quadrature_fn=PulseEnvelope.drag_quadrature,
             )
             drv = PulseEnvelope.build_coeff_fns(
-                PulseEnvelope.drag, omega_c, omega_q, frame="drive"
+                PulseEnvelope.drag,
+                omega_c,
+                omega_q,
+                rwa=False,
+                frame="drive",
+                quadrature_fn=PulseEnvelope.drag_quadrature,
             )
-            p = jnp.array([0.5, 0.3, 5.0, jnp.pi / 2])
+            p = jnp.array([0.5, 0.3, 5.0, 4.0, jnp.pi / 2])  # [A, beta, sigma, T, w]
             ts = jnp.linspace(0.0, 4.0, 50)
             for fl, fd in zip(lab, drv):
                 vals_lab = jnp.array([fl(p, float(t)) for t in ts])
