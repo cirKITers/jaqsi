@@ -872,11 +872,12 @@ def _make_controlled_rotation_subclass(name: str, axis: str) -> type:
                 ]
             # axis == "Y"
             return [
-                RX(-jnp.pi / 2, wires=t, record=False),
+                RX(jnp.pi / 2, wires=t, record=False),
                 RZ(theta / 2, wires=t, record=False),
                 CX(wires=[c, t], record=False),
                 RZ(-theta / 2, wires=t, record=False),
-                RX(jnp.pi / 2, wires=t, record=False),
+                CX(wires=[c, t], record=False),
+                RX(-jnp.pi / 2, wires=t, record=False),
             ]
 
     _CRotation.__name__ = name

@@ -541,6 +541,25 @@ class TestControlledGates:
         )
 
     @pytest.mark.unittest
+    @pytest.mark.parametrize("jaqsi_gate", [CRX, CRY, CRZ], ids=["CRX", "CRY", "CRZ"])
+    @pytest.mark.parametrize("theta", [-1.3, 0.0, 0.37, np.pi, 2 * np.pi])
+    @pytest.mark.parametrize(
+        "n_qubits,wires",
+        [(2, [0, 1]), (2, [1, 0]), (3, [0, 2]), (3, [2, 0])],
+    )
+    def test_controlled_rotation_decomposition_matches_matrix(
+        self, jaqsi_gate, theta, n_qubits, wires
+    ) -> None:
+        """Decompositions preserve the full unitary, including relative phases."""
+        gate = jaqsi_gate(theta, wires=wires, record=False)
+        decomposed = np.eye(2**n_qubits, dtype=complex)
+        for op in gate.decompose():
+            decomposed = np.asarray(op.lifted_matrix(n_qubits)) @ decomposed
+
+        expected = np.asarray(gate.lifted_matrix(n_qubits))
+        np.testing.assert_allclose(decomposed, expected, rtol=0, atol=1e-10)
+
+    @pytest.mark.unittest
     def test_rot_probs(self) -> None:
         """Rot(φ, θ, ω)|0⟩ has probabilities [cos²(θ/2), sin²(θ/2)]."""
         phi, theta, omega = 0.4, 1.2, 2.5
