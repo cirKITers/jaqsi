@@ -98,12 +98,23 @@ Parameter counts depend on the envelope; the counts above are for `gaussian`.
 
 Every envelope except `drag` drives a single quadrature: its envelope $E(t)$ modulates the carrier $\cos(\omega_c t + \phi)$, with $\phi = 0$ for `RX` and $\phi = \pi/2$ for `RY`.
 The envelope is centered at the midpoint $T/2$ of the pulse, where the duration $T$ is the last pulse parameter of `RX` and `RY`.
+`gaussian` is lifted like Qiskit's [`Gaussian`](https://quantum.cloud.ibm.com/docs/api/qiskit/1.4/qiskit.pulse.library.Gaussian), so that it vanishes at the pulse edges instead of switching on and off with a step.
+With parameters $[A, \sigma]$ and $g(t) = e^{-(t - T/2)^2 / (2\sigma^2)}$, its envelope is
+
+$$
+E(t) = A\,\frac{g(t) - g(0)}{1 - g(0)},
+$$
+
+which peaks at $A$ in $T/2$ and is zero at $t = 0$ and $t = T$.
+For $\sigma \gg T$, it tends to the parabola $4 A t (T - t) / T^2$.
 `drag` (Derivative Removal by Adiabatic Gate) follows [Motzoi et al. (2009)](https://doi.org/10.1103/PhysRevLett.103.110501) and adds a second control on the orthogonal carrier $\cos(\omega_c t + \phi + \pi/2)$.
-With parameters $[A, \beta, \sigma]$, the in-phase envelope $E(t)$ is a Gaussian of amplitude $A$ and width $\sigma$, and the quadrature envelope is its derivative $Q(t) = -\beta \dot{E}(t)$, where $\beta$ takes the place of the inverse anharmonicity $1/\Delta$ in Eq. (9) of Motzoi et al. (see also [Gambetta et al. (2011)](https://doi.org/10.1103/PhysRevA.83.012308)).
+With parameters $[A, \beta, \sigma]$, the in-phase envelope $E(t)$ is the lifted Gaussian above, and the quadrature envelope is its derivative $Q(t) = -\beta \dot{E}(t)$, where $\beta$ takes the place of the inverse anharmonicity $1/\Delta$ in Eq. (9) of Motzoi et al. (see also [Gambetta et al. (2011)](https://doi.org/10.1103/PhysRevA.83.012308)).
+While $E$ vanishes at the pulse edges, $\dot{E}$ does not, so $Q$ starts and ends with a step.
+Qiskit's [`Drag`](https://quantum.cloud.ibm.com/docs/api/qiskit/1.4/qiskit.pulse.library.Drag) instead takes its quadrature proportional to $\beta\,(t - T/2)\,E(t) / \sigma^2$, which vanishes at the edges but is not the derivative of the lifted $E$.
 Under the RWA, `RX(w)` then evolves under $\frac{w}{2}\left(E X + Q Y\right)$ and `RY(w)` under $\frac{w}{2}\left(E Y - Q X\right)$.
 Note that jaqsi models qubits as two-level systems, so there is no leakage level for the quadrature to suppress.
 As $E$ is symmetric around $T/2$, $Q$ is odd around it and adds no net area, but it does not commute with the in-phase drive and adds an error about the $Z$ axis whose angle grows as $\beta w^2$, the second term of the [Magnus expansion](https://doi.org/10.1016/j.physrep.2008.11.001).
-Under the RWA, the Gaussian alone already implements the target rotation, which is why the calibrated defaults have $\beta \approx 0$ (below $10^{-16}$) and `drag` then reproduces `gaussian`.
+Under the RWA, the Gaussian alone already implements the target rotation, which is why the calibrated defaults have $\beta \approx 0$ (below $10^{-12}$) and `drag` then reproduces `gaussian`.
 
 Under the hood, pulse gates are simulated by integrating their time-dependent Hamiltonian. The ODE solver can be configured via `Evolution.set_solver_defaults`, where `solver` is one of `"dopri8"` (default), `"dopri5"`, `"magnus2"` or `"magnus4"`:
 

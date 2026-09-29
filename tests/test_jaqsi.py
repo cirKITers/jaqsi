@@ -2334,6 +2334,42 @@ class TestPulse:
         assert val_off_center < val_at_center
 
     @pytest.mark.unittest
+    @pytest.mark.parametrize("name", ["gaussian", "drag"])
+    @pytest.mark.parametrize("sigma", [0.2, 1.0, 1e6])
+    def test_pulse_envelope_gaussian_is_lifted(self, name, sigma):
+        """The Gaussian of ``gaussian`` and ``drag`` vanishes at the pulse edges.
+
+        It peaks at ``A`` in the centre, matches ``A (g - g(0)) / (1 - g(0))``
+        and stays accurate and differentiable for ``sigma >> T``, where it
+        tends to the parabola ``4 A t (T - t) / T^2``.  Far outside the pulse,
+        where adaptive solvers may probe their first step, it stays finite.
+        """
+        A, beta, T = 2.0, 0.3, 1.5
+
+        def env(A, sigma, T, t):
+            p = jnp.array([A, sigma] if name == "gaussian" else [A, beta, sigma])
+            return PulseEnvelope.get(name)["fn"](p, t, T / 2)
+
+        assert env(A, sigma, T, 0.0) == 0.0
+        assert env(A, sigma, T, T) == 0.0
+        assert jnp.isclose(env(A, sigma, T, T / 2), A, atol=1e-12)
+
+        ts = jnp.linspace(0.0, T, 7)
+        if sigma < 10:
+            g = jnp.exp(-0.5 * ((ts - T / 2) / sigma) ** 2)
+            g0 = jnp.exp(-0.5 * (T / 2 / sigma) ** 2)
+            expected = A * (g - g0) / (1 - g0)
+        else:
+            expected = 4 * A * ts * (T - ts) / T**2
+        values = jax.vmap(lambda t: env(A, sigma, T, t))(ts)
+        assert jnp.allclose(values, expected, atol=1e-10)
+
+        for t in (-1e11, 0.0, 0.3 * T, T / 2, T, 1e11):
+            grads = jax.grad(env, argnums=(0, 1, 2, 3))(A, sigma, T, t)
+            assert jnp.isfinite(env(A, sigma, T, t))
+            assert all(jnp.isfinite(g) for g in grads)
+
+    @pytest.mark.unittest
     def test_pulse_envelope_drag_quadratures(self):
         """DRAG drives a Gaussian in phase and ``-beta dE/dt`` in quadrature.
 
@@ -2348,9 +2384,12 @@ class TestPulse:
         d = PulseEnvelope.drag(p_drag, t, t_c)
         assert jnp.isclose(g, d, atol=1e-10)
 
-        dE = jax.grad(lambda s: PulseEnvelope.drag(p_drag, s, t_c))(t)
-        q = PulseEnvelope.drag_quadrature(p_drag, t, t_c)
-        assert jnp.isclose(q, -beta * dE, atol=1e-10)
+        # The in-phase envelope vanishes at the edge t = 0, its derivative not.
+        for s in (t, 0.0):
+            dE = jax.grad(lambda s: PulseEnvelope.drag(p_drag, s, t_c))(s)
+            q = PulseEnvelope.drag_quadrature(p_drag, s, t_c)
+            assert jnp.isclose(q, -beta * dE, atol=1e-10)
+            assert q != 0.0
         assert PulseEnvelope.drag_quadrature(p_drag.at[1].set(0.0), t, t_c) == 0.0
 
     @pytest.mark.unittest

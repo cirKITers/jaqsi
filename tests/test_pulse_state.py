@@ -214,7 +214,8 @@ def test_identical_pulse_gates_are_solved_once():
 def test_single_term_drive_is_solved_in_closed_form():
     """A drive f(t) H commutes with itself, so U = exp(-i F H), F = int f dt.
 
-    For the RWA gaussian RY, F = w A sigma sqrt(2 pi) erf(T / (2 sqrt(2) sigma)) / 2
+    For the RWA gaussian RY, lifted by its edge value g0 = exp(-T^2 / (8 sigma^2)),
+    F = w A (sigma sqrt(2 pi) erf(T / (2 sqrt(2) sigma)) - T g0) / (2 (1 - g0))
     (envelope centre ``T / 2``).  The angle is far beyond pi, where the matrix
     ODE needs hundreds of steps.
     """
@@ -227,7 +228,9 @@ def test_single_term_drive_is_solved_in_closed_form():
     H = PulseGates._coeff_RY_Y * Hermitian(PulseGates.Y, wires=0, record=False)
     U = H.evolve()([jnp.array([A, sigma, T, w])], T).matrix
 
-    F = w * A * sigma * jnp.sqrt(2 * jnp.pi) * erf(T / (2 * jnp.sqrt(2) * sigma)) / 2
+    g0 = jnp.exp(-(T**2) / (8 * sigma**2))
+    area = sigma * jnp.sqrt(2 * jnp.pi) * erf(T / (2 * jnp.sqrt(2) * sigma)) - T * g0
+    F = w * A * area / (2 * (1 - g0))
     expected = jnp.cos(F) * jnp.eye(2) - 1j * jnp.sin(F) * PulseGates.Y
     assert jnp.allclose(U, expected, atol=1e-8)
 

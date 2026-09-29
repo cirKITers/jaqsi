@@ -323,9 +323,33 @@ class PulseEnvelope:
 
     @staticmethod
     def gaussian(p, t, t_c):
-        """Gaussian envelope. ``p = [A, sigma]``."""
+        """Lifted Gaussian envelope. ``p = [A, sigma]``.
+
+        ``A (g(t) - g(0)) / (1 - g(0))`` with ``g(t) = exp(-(t - t_c)^2 /
+        (2 sigma^2))`` peaks at ``A`` in ``t_c`` and vanishes at the pulse
+        edges ``t = 0`` and ``t = 2 t_c``.  This is the continuous-time form of
+        Qiskit's lifted ``Gaussian``, see
+        https://quantum.cloud.ibm.com/docs/api/qiskit/1.4/qiskit.pulse.library.Gaussian
+        """
         A, sigma = p[0], p[1]
-        return A * jnp.exp(-0.5 * ((t - t_c) / sigma) ** 2)
+        return A * PulseEnvelope._lifted_gaussian(sigma, t, t_c)
+
+    @staticmethod
+    def _lifted_gaussian(sigma, t, t_c):
+        """Unit-peak lifted Gaussian ``(g(t) - g(0)) / (1 - g(0))``.
+
+        With ``a = log g(t)``, ``b = log g(0)`` and ``d = a - b = t (2 t_c - t)
+        / (2 sigma^2)``, the numerator is evaluated as ``exp(max(a, b)) *
+        (expm1(min(d, 0)) - expm1(min(-d, 0)))``.  This avoids the cancellation
+        of the plain form for ``sigma >> t_c``, where the shape tends to the
+        parabola ``t (2 t_c - t) / t_c^2``, and stays finite outside the pulse,
+        where adaptive solvers may probe their initial step.
+        """
+        a = -0.5 * ((t - t_c) / sigma) ** 2
+        b = -0.5 * (t_c / sigma) ** 2
+        d = t * (2 * t_c - t) / (2 * sigma**2)
+        rise = jnp.expm1(jnp.minimum(d, 0.0)) - jnp.expm1(jnp.minimum(-d, 0.0))
+        return jnp.exp(jnp.maximum(a, b)) * rise / -jnp.expm1(b)
 
     @staticmethod
     def square(p, t, t_c):
@@ -344,11 +368,11 @@ class PulseEnvelope:
     def drag(p, t, t_c):
         """DRAG (Derivative Removal by Adiabatic Gate) in-phase envelope.
 
-        A Gaussian, ``p = [A, beta, sigma]``; ``beta`` only enters the
-        quadrature envelope :meth:`drag_quadrature`.
+        The lifted Gaussian of :meth:`gaussian`, ``p = [A, beta, sigma]``;
+        ``beta`` only enters the quadrature envelope :meth:`drag_quadrature`.
         """
         A, sigma = p[0], p[2]
-        return A * jnp.exp(-0.5 * ((t - t_c) / sigma) ** 2)
+        return A * PulseEnvelope._lifted_gaussian(sigma, t, t_c)
 
     @staticmethod
     def drag_quadrature(p, t, t_c):
@@ -356,11 +380,14 @@ class PulseEnvelope:
 
         First-order DRAG of Motzoi et al., PRL 103, 110501 (2009), Eq. (9),
         with ``beta`` in place of ``1/Delta``.  At the fixed pulse centre
-        ``t_c``, ``dE/dt = -(t - t_c) / sigma**2 * E``, which is odd around
-        ``t_c``.
+        ``t_c``, ``dE/dt = -A (t - t_c) / sigma**2 * g(t) / (1 - g(0))``,
+        which is odd around ``t_c`` and, unlike ``E``, does not vanish at the
+        pulse edges.
         """
-        beta, sigma = p[1], p[2]
-        return beta * (t - t_c) / sigma**2 * PulseEnvelope.drag(p, t, t_c)
+        A, beta, sigma = p[0], p[1], p[2]
+        g = jnp.exp(-0.5 * ((t - t_c) / sigma) ** 2)
+        lift = -jnp.expm1(-0.5 * (t_c / sigma) ** 2)  # 1 - g(0)
+        return A * beta * (t - t_c) / sigma**2 * g / lift
 
     @staticmethod
     def _no_quadrature(p, t, t_c):
@@ -382,10 +409,10 @@ class PulseEnvelope:
             "n_envelope_params": 2,
             "defaults": {
                 "RX": jnp.array(
-                    [0.3801008674973243, 1.6316924868868257, 3.007391959587671]
+                    [0.44506904345408577, 1.9072729604580203, 3.5213966860043175]
                 ),
                 "RY": jnp.array(
-                    [0.383666678348735, 1.6165899573286193, 2.979402288175433]
+                    [0.449245182920846, 1.8896592598281816, 3.4886409030956145]
                 ),
             },
         },
@@ -420,18 +447,18 @@ class PulseEnvelope:
             "defaults": {
                 "RX": jnp.array(
                     [
-                        0.3814396433883808,
-                        -1.8790253642200544e-19,
-                        1.6275600095764948,
-                        2.9958466892126987,
+                        0.4462644494309652,
+                        5.56779671979968e-19,
+                        1.890265883325973,
+                        3.5141632250053174,
                     ]
                 ),
                 "RY": jnp.array(
                     [
-                        0.3850171507971595,
-                        7.583563770809571e-17,
-                        1.6125269093661498,
-                        2.9679541656644695,
+                        0.45045111802374943,
+                        1.2007294980651857e-13,
+                        1.872843283708579,
+                        3.481473844222316,
                     ]
                 ),
             },
