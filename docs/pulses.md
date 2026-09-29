@@ -43,7 +43,7 @@ from jaqsi.gates import PulseInformation as pinfo
 gate = "CX"
 
 print(f"Number of pulse parameters for {gate}: {pinfo.num_params(gate)}")
-# Number of pulse parameters for CX: 11
+# Number of pulse parameters for CX: 9
 
 gate_instance = pinfo.gate_by_name(gate)
 
@@ -51,10 +51,10 @@ print(f"Childs of {gate}: {gate_instance.childs}")
 # Childs of CX: [H, CZ, H]
 
 print(f"All parameters of {gate}: {len(gate_instance.params)}")
-# All parameters of CX: 11
+# All parameters of CX: 9
 
 print(f"Leaf parameters of {gate}: {len(gate_instance.leaf_params)}")
-# Leaf parameters of CX: 6
+# Leaf parameters of CX: 5
 ```
 
 Looking back at the dependency graph, we can easily see where the discrepancy between the overall number of parameters and the number of leaf parameters comes from.
@@ -93,8 +93,17 @@ print(PulseEnvelope.available())
 # ['gaussian', 'square', 'cosine', 'drag', 'sech', 'general']
 ```
 
-The default is `drag`. The envelope is a process-global setting, switched with `PulseInformation.set_envelope("gaussian")`.
-Parameter counts depend on the envelope; the counts above are for `drag`.
+The default is `gaussian`. The envelope is a process-global setting, switched with `PulseInformation.set_envelope("drag")`.
+Parameter counts depend on the envelope; the counts above are for `gaussian`.
+
+Every envelope except `drag` drives a single quadrature: its envelope $E(t)$ modulates the carrier $\cos(\omega_c t + \phi)$, with $\phi = 0$ for `RX` and $\phi = \pi/2$ for `RY`.
+The envelope is centered at the midpoint $T/2$ of the pulse, where the duration $T$ is the last pulse parameter of `RX` and `RY`.
+`drag` (Derivative Removal by Adiabatic Gate) follows [Motzoi et al. (2009)](https://doi.org/10.1103/PhysRevLett.103.110501) and adds a second control on the orthogonal carrier $\cos(\omega_c t + \phi + \pi/2)$.
+With parameters $[A, \beta, \sigma]$, the in-phase envelope $E(t)$ is a Gaussian of amplitude $A$ and width $\sigma$, and the quadrature envelope is its derivative $Q(t) = -\beta \dot{E}(t)$, where $\beta$ takes the place of the inverse anharmonicity $1/\Delta$ in Eq. (9) of Motzoi et al. (see also [Gambetta et al. (2011)](https://doi.org/10.1103/PhysRevA.83.012308)).
+Under the RWA, `RX(w)` then evolves under $\frac{w}{2}\left(E X + Q Y\right)$ and `RY(w)` under $\frac{w}{2}\left(E Y - Q X\right)$.
+Note that jaqsi models qubits as two-level systems, so there is no leakage level for the quadrature to suppress.
+As $E$ is symmetric around $T/2$, $Q$ is odd around it and adds no net area, but it does not commute with the in-phase drive and adds an error about the $Z$ axis whose angle grows as $\beta w^2$, the second term of the [Magnus expansion](https://doi.org/10.1016/j.physrep.2008.11.001).
+Under the RWA, the Gaussian alone already implements the target rotation, which is why the calibrated defaults have $\beta \approx 0$ (below $10^{-16}$) and `drag` then reproduces `gaussian`.
 
 Under the hood, pulse gates are simulated by integrating their time-dependent Hamiltonian. The ODE solver can be configured via `Evolution.set_solver_defaults`, where `solver` is one of `"dopri8"` (default), `"dopri5"`, `"magnus2"` or `"magnus4"`:
 
@@ -108,7 +117,8 @@ The `magnus_steps` argument sets the number of fixed substeps for the Magnus int
 
 A drive with a single term, $H(t) = f(t)\,H$, commutes with itself at all times, so its gate is $e^{-i F H}$ with $F = \int f(t)\,dt$.
 The Dormand-Prince solvers then integrate the scalar $F$ only, which takes a handful of steps whatever the rotation angle, whereas the matrix ODE needs more steps the larger the angle.
-Under the RWA (the default) every pulse gate is such a drive; without it, `RX` and `RY` keep two non-commuting terms and are integrated as a matrix ODE.
+`RZ` and `CZ` are always such drives, and so are `RX` and `RY` under the RWA with a single-quadrature envelope such as `gaussian`.
+With `drag`, or without the RWA, `RX` and `RY` keep two non-commuting terms and are integrated as a matrix ODE.
 `Evolution.set_solver_defaults(closed_form=False)` integrates single-term drives as a matrix ODE as well, e.g. to compare against simulators that do not exploit this.
 
 The Magnus integrators and the single-term drives return exactly unitary gates, the Dormand-Prince solvers of the matrix ODE only up to their tolerance (about 1e-10 per gate in double precision).
@@ -150,6 +160,7 @@ Primarily, the fidelity between the pulse gate and a target unitary is optimized
 For the exact weighting between these cost functions, we refer to `default_qoc_params`.
 
 Besides the cost functions and their respective weights, you can also specify the envelope used for the pulse gate.
+Under the RWA, the rotation of a single-quadrature pulse only depends on its area $\int_0^T E(t)\,dt$, so the calibration fixes the area but leaves the shape of the pulse open.
 
 For further examples we refer to our ["Pulses" notebook](https://github.com/cirKITers/jaqsi/blob/main/docs/pulses.ipynb).
 

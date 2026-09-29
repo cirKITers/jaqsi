@@ -170,7 +170,7 @@ for _ in range(30):
     loss, grads = jax.value_and_grad(infidelity)(pulse_params)
     updates, opt_state = opt.update(grads, opt_state, pulse_params)
     pulse_params = optax.apply_updates(pulse_params, updates)
-# infidelity 6.3e-02 -> ~1e-04
+# infidelity 6.3e-02 -> ~1e-05
 ```
 
 This hand-rolled loop is only meant to show the mechanism.
