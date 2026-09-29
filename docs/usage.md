@@ -1,60 +1,50 @@
 # Usage
 
-This page aims to provide a brief overview of JAQSI (just another quantum simulator).
+Your circuit is just a Python function: call gates inside it, then hand it to `Script` to run. This gives you direct control over gate placement, noise, measurements, and pulse simulation. Higher-level tools such as [qml-essentials](https://github.com/cirKITers/qml-essentials) build on the same interfaces.
 
-Circuits are built by calling gates inside a plain Python function and are executed through the `Script` class.
-Frameworks layered on top of JAQSI (such as [qml-essentials](https://github.com/cirKITers/qml-essentials), which builds quantum Fourier models on it) usually abstract the simulator away entirely, but building custom circuits with more granular control is a first-class use case.
-
-In the figure below, you can see how JAQSI provides the foundation for the more standard interfaces `Model`, `Ansaetze` and `Gates`.
-The circuit-constructing layers interface with the `Operations` module of JAQSI, while `Model` interfaces with the `Script` class, the main interface for circuit execution.
-
-Generally, all operations are registered on a `Tape` when being created in the context of a `Script` (see examples below).
-All gate matrix definitions are registered in the `Gateset` module, the Kraus channels for noisy simulation in `Noise`, and the shared `Operation` machinery in `Operations`.
+The diagram shows how JAQSI supports higher-level `Model` and `Ansaetze` interfaces. Gates and observables are `Operation` objects recorded on a `Tape`; `Script` executes the tape and returns measurements.
 
 ![overview](figures/jaqsi_overview_light.png#center#only-light)
 ![overview](figures/jaqsi_overview_dark.png#center#only-dark)
 
-While the standard gate execution is quite straightforward, the pulse simulation requires a bit more care.
-Here we split up `PulseGates` (abstracted by the `Gates` class) into `PulseParams` and `PulseEnvelope` to get more fine-grained control over the underlying implementation.
-As a single source of truth for both, there is the `PulseInformation` class, providing valid combinations of these two characteristics.
+Pulse simulation adds two pieces to gate execution: `PulseParams` stores the values used to construct a pulse, and `PulseEnvelope` defines its shape. `PulseInformation` coordinates their valid combinations. Most circuits use these through `Gates`, which selects `PulseGates` when `pulse=True`.
 
 ![overview](figures/jaqsi_pulse_light.png#center#only-light)
 ![overview](figures/jaqsi_pulse_dark.png#center#only-dark)
 
 ## Architecture
 
-Internally, the simulator is split into a handful of modules, each with a single responsibility.
-Together they form a pipeline that turns a circuit function into a measurement result.
+For a peek under the hood, here is how each module helps turn a circuit function into a measurement:
 
-- `operations.py` : the foundation. Defines the `Operation` base class that every gate, observable and noise channel derives from, together with the (parametrized) Hamiltonians used for pulse evolution. Each `Operation` carries its matrix definition and knows how to apply itself to a statevector or density matrix via cached `einsum` contractions.
-- `gates.py` : **the entry point for applying gates.** `Gates.<Name>(...)` records a gate on the tape, attaches any requested noise, and routes the call to `UnitaryGates` or `PulseGates` depending on the `pulse` flag. Write circuits against this and they run at either level unchanged.
-- `unitary.py` : the ideal-unitary backend. Builds the `gateset` operation for each gate and attaches the requested noise channels; also home to the `GateError` angle noise and the `batch_gate_error` flag.
-- `pulses.py` : the pulse-level backend. Implements the fundamental gates (RX, RY, RZ, CZ) as time-dependent drives and composes the rest from them, with `PulseParams`, `PulseEnvelope` and the global `PulseInformation` calibration state.
-- `gateset.py` : the gate library. Every concrete gate (`H`, `RX`, `CX`, `Rot`, `PauliRot`, ...) and observable (`PauliZ`, ...) as an `Operation` subclass, so instantiating one inside a circuit function records it on the active tape.
-- `paulis.py` : the symbolic Pauli/Clifford layer. A stabilizer-tableau `PauliWord` with O(n) Clifford conjugation plus the matrix-based decomposition helpers it replaces. Symbolic bookkeeping in integer NumPy rather than numeric simulation; it backs Pauli-Clifford circuit transforms and Fourier-tree algorithms built on top of JAQSI.
-- `noise.py` : the Kraus noise channels (`BitFlip`, `DepolarizingChannel`, `AmplitudeDamping`, `ThermalRelaxationError`, ...), layered on `Operation`. Recording any of them on a tape is what switches the simulation from statevector to density matrix.
-- `tape.py` : the recording layer. Holds the thread-local `Tape` onto which operations register themselves as they are created. A `recording()` context manager collects the operations built inside a circuit function into an ordered list; nothing is executed yet.
-- `script.py` : the orchestrator. The `Script` class is **the entry point for executing a circuit** (and what `Model` builds upon), the counterpart to `Gates` for building one. It records the circuit, infers the number of qubits, decides between pure and density-matrix simulation, dispatches measurements, and takes care of JIT caching, automatic batching (`vmap` with memory-aware chunking, cache-sized tiles and splitting over devices) and circuit drawing.
-- `simulation.py` : the compute engine. A set of pure, stateless functions that run a recorded tape: `simulate_pure` (statevector), `simulate_mixed` (density matrix) and the measurement kernels (`measure_state`, `measure_density`, `sample_shots`). Before simulating, `simulate_and_measure` resolves the pulse-level gates of the tape through `evolution.resolve_pending`. Being pure JAX functions, they are fully differentiable and `jit`/`vmap`-compatible.
-- `memory.py` : memory accounting. Pure helpers that estimate the peak memory of a batched run and, when it would not fit in available RAM, split the batch into chunks that do (`estimate_peak_bytes`, `compute_chunk_size`, `execute_chunked`). `Script` calls these to drive its memory-aware `vmap` chunking.
-- `drawing.py` : rendering. Turns a recorded tape into a text, matplotlib or TikZ circuit diagram, and pulse events into a pulse-schedule plot.
-- `evolution.py` : Hamiltonian time-evolution. The `Evolution` class builds gates that evolve a (parametrized) Hamiltonian in time, either analytically (`exp(-i t H)` for a static `H`, `exp(-i F H)` with `F` the integral of `f(t)` for a single-term drive `f(t) H`) or by solving the Schrödinger equation with an adaptive `diffrax` solver or a fixed-step Magnus integrator. Time-dependent gates are returned as lazy `PendingEvolution` operations; `resolve_pending` solves all pending gates of a tape in one batched call per pulse shape, optionally on the host CPU (`host_offload`). This module backs the pulse-level simulation.
-- `__init__.py` : the package entry point. Re-exports `Script` for circuit building, `Gates` for applying them, the `Hamiltonian` factory for time-evolution sources, and the quantum-info helpers, so that `import jaqsi` is enough for everyday use. Time evolution is invoked as a method on the Hamiltonian object (`hamiltonian.evolve(...)`); the `Evolution` engine is re-exported for solver configuration (`Evolution.set_solver_defaults`).
-- `math.py` : model-agnostic quantum-info utilities on states and density matrices: `fidelity`, `trace_distance`, `phase_difference`, `logm_v`, the quantum Fisher information and Fubini-Study metric, plus the pulse/gate-independent post-processing helpers `partial_trace` and `marginalize_probs`.
-- `qoc.py` : quantum optimal control. Optimizes pulse parameters against a target unitary with a configurable cost-function registry, and ships the tuned results as `qoc_results_<envelope>.csv` package data.
+- `operations.py` defines the `Operation` base class for gates, observables, and noise channels, along with the Hamiltonian objects used for evolution.
+- `gates.py` provides `Gates`, the circuit-facing interface. It records a gate, attaches requested noise, and selects `UnitaryGates` or `PulseGates` from the `pulse` flag.
+- `unitary.py` applies ideal gates from `gateset.py` and handles gate-angle errors and noise channels.
+- `pulses.py` implements RX, RY, RZ, and CZ as pulses and builds composite gates from them. It also contains pulse envelopes, parameters, and calibration state.
+- `gateset.py` defines concrete gate and observable classes. Instantiating one inside a recorded circuit adds it to the tape.
+- `paulis.py` provides symbolic Pauli and Clifford operations, including `PauliWord`, without constructing a full matrix for every operation.
+- `noise.py` defines Kraus channels. Recording one switches execution from a statevector to a density matrix.
+- `tape.py` collects operations in circuit order before simulation starts.
+- `script.py` provides `Script`, the execution interface. It records a circuit, selects the simulation mode, handles batching and caching, and draws circuits.
+- `simulation.py` contains the statevector, density-matrix, and measurement kernels that run the recorded tape.
+- `memory.py` estimates batch memory use and splits batches into chunks when needed.
+- `drawing.py` renders circuit diagrams and pulse schedules.
+- `evolution.py` turns static or time-dependent Hamiltonians into gates. It also batches pending pulse solves by pulse shape.
+- `__init__.py` re-exports the common interfaces for `import jaqsi`.
+- `math.py` provides quantum information functions for states and density matrices.
+- `qoc.py` optimizes pulse parameters against target gates.
 
 A call to `Script.execute(...)` then runs four stages:
 
-1. Record : the circuit function is executed once so that each operation registers itself on a fresh `Tape`.
-2. Prepare : the qubit count is inferred and the presence of noise channels decides between statevector and density-matrix simulation.
-3. Simulate : the operations are applied in order, each gate contracted into the state via `einsum`.
-4. Measure : the resulting state is turned into the requested output (`state`, `probs`, `expval` or `density`) and optionally sampled into shots.
+1. **Record:** Run the circuit function once so its operations register on a fresh `Tape`.
+2. **Prepare:** Infer the qubit count and choose statevector or density-matrix simulation from the recorded operations.
+3. **Simulate:** Apply gates and channels in circuit order, resolving pulse evolutions when needed.
+4. **Measure:** Return a state, probabilities, expectation values, or a density matrix; optionally sample shots.
 
 As the whole pipeline is built on JAX, any execution can be differentiated, JIT-compiled and vectorized.
 
 ## Usage
 
-The API of our simulator is very similar to what one might be used to from PennyLane.
+Now let's put those pieces to work in a circuit.
 
 ### Gate Level
 
@@ -64,14 +54,14 @@ attaches any requested noise, and routes the call to the unitary or the pulse ba
 Write circuits against `Gates` and the same circuit runs at either level; see
 [pulse level](#pulse_level) below.
 
-For a basic circuit execution, we have to do two imports:
+Import JAQSI and `Gates`:
 
 ```python
 import jaqsi as js
 from jaqsi import Gates
 ```
 
-Next, we can create a circuit and specify the observable:
+Define a circuit and observables:
 
 ```python
 def circuit():
@@ -81,18 +71,16 @@ def circuit():
 obs = [js.PauliZ(wires=0), js.PauliZ(wires=1)]
 ```
 
-Observables are the one place you reach past `Gates`: an observable is an object you hand to
-`execute`, not a gate you apply, so it comes straight from the package root (equivalently
-`jaqsi.gateset`).
+Observables are operation objects passed to `execute`, rather than gates applied inside the circuit. They are available from `jaqsi` or `jaqsi.gateset`.
 
-Finally, creating a `Script` and executing it will give us the probabilities for this standard Bell circuit:
+Run the Bell circuit and ask for its probabilities:
 
 ```python
 jss = js.Script(circuit)
 jss.execute(type="probs", obs=obs)
 ```
 
-Parameterization of circuits is straightforward; you just have to pass the args to the `execute` function:
+Pass circuit parameters through `execute(args=...)`:
 
 ```python
 import jax.numpy as jnp
@@ -108,7 +96,7 @@ jss = js.Script(circuit)
 jss.execute(type="expval", obs=obs, args=(jnp.pi, 1/2*jnp.pi, 1/4*jnp.pi))
 ```
 
-Training those circuits is a breeze as we entirely build upon JAX and can just use Optax for this purpose:
+To tune the parameters, use JAX and Optax directly:
 
 ```python
 import jax
@@ -190,8 +178,7 @@ When batching with `in_axes`, `initial_state` may be a single 1D state broadcast
 
 ### Pulse Level
 
-This section focuses on the pulse-level interface of the simulator.
-For pulse gate mechanics, envelopes and quantum optimal control, head over to the [pulses](pulses.md) documentation.
+The same circuit interface also works for pulses. This section shows how to switch levels; the [pulse guide](pulses.md) explores envelopes, Hamiltonians, and quantum optimal control in more detail.
 
 Pulse-level simulation goes through the same entry point: pass `pulse=True` to any gate and
 `Gates` routes it to the pulse backend instead of the ideal unitary.
@@ -204,7 +191,7 @@ def circuit(w):
 obs = [js.PauliZ(0)]
 jss = js.Script(circuit)
 res = jss.execute(type="expval", obs=obs, args=(jnp.pi*0.5,))
-print(res) # expect sth. around 0 (but not too close)
+print(res)  # approximately zero
 ```
 
 Because the flag is per call, a circuit can mix both levels — here the entangling gate stays
@@ -233,9 +220,7 @@ purity = jnp.real(jnp.trace(rho @ rho))
 print(purity) # Purity should be < 1 
 ```
 
-You can visualize the pulse schedules, i.e. the sequence in which the pulses are applied on each qubit in the circuit, using the `draw` method.
-Here, shaded areas represent the pulse shape/envelope (e.g. "Gaussian") of the pulse and the vertical line represents the time at which the pulse is applied.
-Note that all gates are automatically decomposed into basis gates (e.g. `H` is decomposed into `RZ` and `RY`).
+Use `draw` to plot when pulses act on each qubit. Shaded regions show the pulse envelopes and vertical lines mark virtual Z gates. Composite gates are decomposed into their basis gates for the plot; for example, `H` becomes RZ and RY.
 
 ```python
 def circuit(w):
@@ -252,9 +237,7 @@ fig, axes = jss.draw(figure="pulse", args=(jnp.pi*0.5,))
 ![pulse-schedule](figures/pulse_schedule_light.png#center#only-light)
 ![pulse-schedule](figures/pulse_schedule_dark.png#center#only-dark)
 
-Now let's get a level deeper into the pulse interface.
-Under the hood, running a pulse gate means evolving a Hermitian matrix in time.
-To demonstrate this, we build a very simple circuit:
+Underneath a pulse gate is Hamiltonian evolution over time. You can use that evolution interface directly; this circuit starts with a static Pauli Z Hamiltonian.
 
 ```python
 def evol_circuit(t):
@@ -262,16 +245,14 @@ def evol_circuit(t):
     time_evol(t=t, wires=0)
 ```
 
-We can use this circuit directly in JAQSI by passing it to the `Script` class we've seen above:
+Execute it with `Script`:
 
 ```python
 jss = js.Script(f=evol_circuit)
 res = jss.execute(type="expval", obs=[js.PauliX(0)], args=(0.3,))
 ```
 
-Here, we let the circuit evolve for `t=0.3` and measure the qubit in the `X` basis.
-Obviously this isn't particularly useful, because it doesn't change the state of the qubit.
-However, we can extend this circuit a little bit to start in the `|+⟩` state instead:
+Here, the circuit starts in $|0\rangle$, so Z evolution changes only its phase and the X expectation value stays zero. Preparing $|+\rangle$ first makes the evolution visible in that measurement:
 
 ```python
 def evol_circuit(t):
@@ -280,8 +261,7 @@ def evol_circuit(t):
     time_evol(t=t, wires=0)
 ```
 
-Note how we combine a "standard" gate with a Hermitian evolution.
-We can then measure:
+Measure the evolved state:
 
 ```python
 t = 0.3
@@ -289,10 +269,9 @@ jss = js.Script(f=evol_circuit)
 res = jss.execute(type="expval", obs=[js.PauliX(0)], args=(t,))
 ```
 
-which gives us exactly `jnp.cos(2 * t)`.
+The X expectation value is `jnp.cos(2 * t)`. This example combines an ordinary gate with Hamiltonian evolution in one circuit.
 
-We've just seen an example for a static Hermitian evolution.
-Naturally we can extend this to a parameterized Hermitian as well:
+The Hamiltonian can also depend on a parameter. Multiply a `Hermitian` by a coefficient function to describe how its strength changes with the supplied parameters and time:
 
 ```python
 def coeff(p, t):
@@ -304,8 +283,7 @@ def circuit(p, t):
     ph.evolve()([p], t)
 ```
 
-Note here that `coeff` is a callable.
-While it seems a little bit strange to first use a callable and then parameterize it directly afterwards, this mechanism allows us to pre-compile the operation.
+The callable `coeff` defines the dependence, while `[p]` supplies its parameter when the circuit runs. Keeping the coefficient function separate lets JAQSI reuse its compiled evolution code.
 
 ```python
 p = 0.5
@@ -313,4 +291,4 @@ jss = js.Script(f=circuit)
 res = jss.execute(type="expval", obs=[js.PauliX(0)], args=(p, t))
 ```
 
-Naturally, we can now use this parameter in a training scenario and leverage the performance advantage we got through the pre-compilation.
+And because the circuit is differentiable, you can train `p` with JAX as in the [training guide](training.md).

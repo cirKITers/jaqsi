@@ -1,6 +1,6 @@
 # Math Utils
 
-A collection of model-agnostic math tools, operating on density matrices or states directly.
+These model-independent functions operate directly on statevectors and density matrices. Bring a state from a JAQSI circuit or from elsewhere; the same functions work for both.
 
 ```python
 from jaqsi.math import quantum_fisher_information, fubini_study_metric, fidelity, trace_distance, phase_difference
@@ -8,9 +8,7 @@ from jaqsi.math import quantum_fisher_information, fubini_study_metric, fidelity
 
 ## Quantum Fisher Information
 
-The Quantum Fisher Information (QFI) is the metric tensor of the state manifold evaluated at a specific parameter point $\theta$.
-Because it depends on the derivatives of the state with respect to the parameters, it is computed from the state as a **function** of the parameters rather than from a single state.
-The Jacobian is obtained via forward-mode automatic differentiation, which yields the complex Jacobian directly for the real-valued circuit parameters.
+Quantum Fisher Information (QFI) is a metric tensor on the space of quantum states, evaluated at a parameter point $\theta$. It depends on derivatives of the state with respect to those parameters, so the input must be a **function** that returns a state rather than a single state value. JAQSI uses forward-mode automatic differentiation to compute the complex Jacobian for real-valued circuit parameters.
 
 For a pure, normalized state $\ket{\psi(\theta)}$ the QFI is the Fubini-Study metric (scaled by four):
 
@@ -20,8 +18,7 @@ For a mixed state $\rho(\theta) = \sum_k p_k \ket{k}\bra{k}$ the QFI is given th
 
 \[F_{ij} = 2 \sum_{k, l\,:\,p_k + p_l > 0} \frac{\mathrm{Re}\left(\braket{k | \partial_i\rho | l}\braket{l | \partial_j\rho | k}\right)}{p_k + p_l}\]
 
-Both cases are handled by the same function, which dispatches on the kind of state returned by the provided callable.
-Execute with `type="state"` to obtain the pure-state QFI, or with `type="density"` (e.g. for noisy circuits) to obtain the mixed-state QFI:
+`quantum_fisher_information` selects the formula from the shape of the state returned by the callable. Execute a circuit with `type="state"` for pure-state QFI, or `type="density"` for mixed-state QFI, such as in a noisy circuit:
 
 ```python
 import jax.numpy as jnp

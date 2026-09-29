@@ -8,49 +8,46 @@
 
 ## 📜 About
 
-JAQSI is a gate- and pulse-level quantum circuit simulator built on JAX.\
-Circuits are plain Python functions that record operations onto a tape; the `Script` class compiles and executes them, routing between statevector and density-matrix simulation automatically depending on whether noise channels are present.
-Everything is pure JAX, so circuits are differentiable, `jit`-able and `vmap`-able out of the box.
+JAQSI is a JAX-based quantum circuit simulator for gates and pulses. Write a circuit as a Python function, then let JAQSI take care of the simulation.
+The function records operations; `Script` executes them with statevector or density-matrix simulation, depending on whether they contain noise.
+Circuits support JAX differentiation, `jit`, and `vmap`.
 
-Beyond gate-level simulation, JAQSI simulates circuits at the pulse level by integrating the time-dependent Hamiltonian of each gate, and ships a quantum optimal control module to tune pulse parameters against target unitaries.
+At the pulse level, JAQSI integrates each gate's time-dependent Hamiltonian. Its quantum optimal control module tunes pulse parameters against target unitaries.
 
 ## 🚀 Getting Started
 
-```
+```sh
 pip install jaqsi
 ```
 
-to install our package from [PyPI](https://pypi.org/project/jaqsi/).
-
-For NVIDIA GPUs install the CUDA extra
+For NVIDIA GPUs, install the appropriate CUDA extra:
 
 ```
-pip install "jaqsi[cuda13]" # or cuda12 depending on your hardware
+pip install "jaqsi[cuda13]" # use cuda12 if needed
 ```
 
-JAX then runs on the GPU by default; set `JAX_PLATFORMS=cpu` to force the CPU.
-Note that pulse-level simulation is supported but not necessarily ideal on GPU; see the [pulses docs](docs/pulses.md) for details.
+The [pulse guide](docs/pulses.md) has a few device tips for GPU runs.
 
 ```python
 import jaqsi
+import jax.numpy as jnp
 
 def circuit(theta):
     jaqsi.Gates.RX(theta[0], wires=0)
     jaqsi.Gates.CX(wires=[0, 1])
 
 script = jaqsi.Script(circuit, n_qubits=2)
+theta = jnp.array([0.5])
 script.execute(type="expval", obs=[jaqsi.PauliZ(wires=0)], args=(theta,))
 ```
 
-You can find details on how to use it and further documentation on the corresponding [Github Page](https://cirkiters.github.io/jaqsi/).
+That is a complete circuit. The [documentation](https://cirkiters.github.io/jaqsi/) has more examples to try.
 
-Looking for quantum Fourier model tooling (ansaetze, expressibility, entangling capability, Fourier analysis) built on top of this simulator? 
-See [qml-essentials](https://github.com/cirKITers/qml-essentials).
+For quantum Fourier models, [qml-essentials](https://github.com/cirKITers/qml-essentials) builds on JAQSI and provides ansätze, expressibility, entangling capability, and Fourier analysis tools.
 
 ## 📦 Package Structure
 
-The following diagram provides an overview on how the different components within this package depend on each other.
-`Gates` is the entry point for applying gates to a circuit and `Script` the one for executing it; everything below them is the machinery they dispatch to.
+Here is how the pieces fit together. `Gates` applies gates; `Script` executes circuits.
 
 ```mermaid
 flowchart LR
@@ -102,6 +99,6 @@ flowchart LR
 
 ## 🚧 Contributing
 
-Contributions are highly welcome! 🤗 Take a look at our [Contribution Guidelines](https://github.com/cirKITers/jaqsi/blob/main/CONTRIBUTING.md).
+Contributions are welcome! See the [contribution guidelines](CONTRIBUTING.md) to get involved.
 
-See our [coverage report](coverage/index.html) if you would like to contribute with further tests.
+The [coverage report](coverage/index.html) is a handy place to look for tests to add.

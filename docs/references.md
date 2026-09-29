@@ -1,13 +1,10 @@
 ## Gates
 
-`Gates` is **the entry point for applying gates to a circuit**.
-It records the gate on the active tape, attaches any requested noise, and routes the call to
-either `UnitaryGates` or `PulseGates` depending on the `pulse` keyword.
-The two backends below, and the matrix-level classes in `jaqsi.gateset`, are what `Gates`
-dispatches to; call them directly only when you need the operation object itself (for
-observables, `.dagger()` / `.power()`, or matrix algebra).
+`Gates` is the entry point for applying gates inside a circuit. It records each gate on the active tape, attaches requested noise, and dispatches to `UnitaryGates` or `PulseGates` according to the `pulse` keyword. Most circuits can use this one interface for both execution levels.
 
-As the structure of the different classes used to realize pulse and unitary gates can be a bit confusing, the following diagram might help:
+The classes in `jaqsi.gateset` expose the operation objects themselves. Use them for observables, `.dagger()`, `.power()`, or matrix algebra, where an object is needed rather than a gate call.
+
+The diagram shows how the gate interfaces relate:
 
 ![Gate Structure](figures/pulses_structure_light.png#center#only-light)
 ![Gate Structure](figures/pulses_structure_dark.png#center#only-dark)

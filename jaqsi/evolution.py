@@ -1,14 +1,7 @@
-"""Hamiltonian time-evolution machinery for pulse/gate construction.
+"""Evolve Hamiltonians into gates by solving ``dU/dt = -i H(t) U``.
 
-This module houses the :class:`Evolution` class, which turns a (static or
-time-dependent) Hamiltonian into a gate factory by solving the Schrödinger
-equation ``dU/dt = -i H(t) U``.  It is the pulse/gate-dependent counterpart to
-the otherwise pulse-agnostic Hamiltonian sources in :mod:`jaqsi.operations`.
-
-The engine is normally reached through the :meth:`evolve` method on the
-Hamiltonian object (``Hermitian`` / ``ParametrizedHamiltonian``), which delegates
-to :meth:`Evolution.evolve`.  :class:`Evolution` is also where solver defaults
-live (:meth:`Evolution.set_solver_defaults`).
+Use ``Hermitian.evolve`` or ``ParametrizedHamiltonian.evolve`` to create gates.
+Configure the solver with :meth:`Evolution.set_solver_defaults`.
 """
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -79,13 +72,9 @@ class Evolution:
     # T/N`` resolves the fastest oscillation in ``H(t)`` (~few steps
     # per period of the highest frequency).
     #
-    # ``host_offload`` runs the ODE solves on the host CPU while the rest
-    # of the circuit stays on the accelerator (no effect on a CPU
-    # backend).  An adaptive solve on a 2x2 / 4x4 matrix is launch-latency
-    # bound on a GPU, so this pays off below roughly a thousand solves per
-    # call and loses above; hence opt-in.  Works for forward simulation
-    # under ``jit``/``vmap`` and for an eager ``jax.grad``; XLA (jax 0.9)
-    # fails to compile the offloaded loop inside ``jax.jit(jax.grad(...))``.
+    # ``host_offload`` runs ODE solves on the host CPU while the circuit
+    # stays on the accelerator.  It is opt-in because performance depends
+    # on workload size.  It is unsupported inside ``jax.jit(jax.grad(...))``.
     #
     # ``closed_form`` lets the adaptive solvers integrate only the scalar
     # pulse area of a single-term drive with a concrete matrix (see
@@ -421,39 +410,16 @@ class Evolution:
         name: Optional[str] = None,
         **odeint_kwargs: Any,
     ) -> Callable:
-        """Return a gate-factory for Hamiltonian time evolution.
+        """Return a gate factory for static or time-dependent evolution.
 
-        Engine for the :meth:`Hermitian.evolve` / :meth:`ParametrizedHamiltonian.evolve`
-        methods (the usual entry point); it dispatches on the Hamiltonian type.
-
-        Supports two modes:
-
-        Static — when *hamiltonian* is a :class:`Hermitian`::
-
-            gate = Hermitian(H_mat, wires=0).evolve()
-            gate(t=0.5)            # U = exp(-i*0.5*H)
-
-        Time-dependent — when *hamiltonian* is a
-        :class:`ParametrizedHamiltonian` (created via ``coeff_fn * Hermitian``)::
-
-            H_td = coeff_fn * Hermitian(H_mat, wires=0)
-            gate = H_td.evolve()
-            gate([A, sigma], T)    # U via ODE: dU/dt = -i f(p,t) H * U
-
-        The time-dependent case solves the Schrödinger equation numerically
-        using ``diffrax.diffeqsolve`` with a Dopri8 adaptive Runge-Kutta
-        solver
-
-        All computations are pure JAX and fully differentiable with
-        ``jax.grad``.
+        Static Hamiltonians use ``exp(-i t H)``. Time-dependent Hamiltonians
+        solve the Schrödinger equation with the configured solver. Both modes
+        support JAX differentiation.
 
         Args:
             hamiltonian: Either a :class:`Hermitian` (static evolution) or a
                 :class:`ParametrizedHamiltonian` (time-dependent evolution).
-            **odeint_kwargs: Extra keyword arguments.  Recognised keys:
-
-                - ``atol``, ``rtol`` — absolute/relative tolerances for the
-                adaptive step-size controller (default ``1.4e-8``).
+            **odeint_kwargs: Solver options such as ``atol`` and ``rtol``.
 
         Returns:
             A callable gate factory.  Signature depends on the mode:
@@ -501,7 +467,7 @@ class Evolution:
 
             dU/dt = -i [\\sum_i f_i(params_i, t) * H_i] * U,    U(0) = I
 
-        with ``diffrax.diffeqsolve`` (Dopri8 adaptive RK).  The Hamiltonian
+        with the configured solver. The Hamiltonian
         may contain one or more ``coeff_fn * Hermitian`` terms (see
         :class:`ParametrizedHamiltonian`); the single-term case is the
         usual ``coeff_fn * Hermitian`` and is fully backward compatible.
@@ -540,7 +506,7 @@ class Evolution:
                   ``1.0e-10`` in fp64 mode).
                 - ``max_steps`` — hard cap on accepted ODE steps
                   (default :attr:`cls._solver_defaults['max_steps']`,
-                  currently ``2**14``).  Increase this if the integrator
+                  currently ``2**13``).  Increase this if the integrator
                   raises ``MaxStepsReached`` for a stiff/oscillatory
                   pulse Hamiltonian.
                 - ``throw`` — whether to raise on solver failure

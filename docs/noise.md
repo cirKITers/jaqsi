@@ -1,6 +1,6 @@
 # Noise
 
-Every gate in JAQSI accepts an optional `noise_params` dictionary containing all the noise parameters of the circuit (here all with probability $0.0$):
+Every gate accepts an optional `noise_params` dictionary. Start with zeros, then turn up the channels you want to explore:
 ```python
 noise_params = {
     "BitFlip": 0.0,
@@ -12,10 +12,9 @@ noise_params = {
 }
 ```
 
-Providing this optional input will apply the corresponding noise, where the Bit Flip, Phase Flip, Depolarizing and Two-Qubit Depolarizing Channels are applied after each gate and the Amplitude and Phase Damping are applied at the end of the circuit.
-The channels themselves live in `jaqsi.noise` as `KrausChannel` operations; the gate front-ends emit them for you when `noise_params` is passed.
+Bit flip, phase flip, and single- or multi-qubit depolarizing channels run after each gate. Amplitude and phase damping run at the end of the circuit. These channels are `KrausChannel` operations in `jaqsi.noise`; passing `noise_params` through `Gates` records them for you.
 
-Recording a noise channel on the tape automatically switches `Script` from statevector to density-matrix simulation, so the `density` execution type is what you want for a noisy circuit:
+Once a noise channel is on the tape, `Script` switches from statevector to density-matrix simulation for you. Use `type="density"` to inspect the resulting noisy state:
 
 ```python
 import jaqsi
@@ -37,13 +36,9 @@ def circuit(theta):
 rho = jaqsi.Script(circuit, n_qubits=2).execute(type="density", args=(theta,))
 ```
 
-In addition to these decoherent errors, we can also apply a `GateError` which affects each parameterized gate as $w = w + \mathcal{N}(0, \epsilon)$, where $\sqrt{\epsilon}$ is the standard deviation of the noise, specified by the `GateError` key in the `noise_params` argument.
-Each gate draws its own error, independently of the other gates in the circuit.
-Because `GateError` is stochastic, a `random_key` must be passed alongside it.
+`GateError` models a different kind of error: it perturbs each parameterized gate angle as $w \mapsto w + \mathcal{N}(0, \epsilon)$, with standard deviation $\sqrt{\epsilon}$. Each gate draws its own perturbation. Because this error is stochastic, pass a `random_key` alongside it.
 
-It's important to note that, depending on the flag set in `UnitaryGates.batch_gate_error`, the error of a given gate will be applied to the entire batch of parameters (all batch elements are affected in the same way) or drawn for each batch element individually (default).
-This can be particularly useful in a scenario where one would like to apply noise e.g. only on a subset of the gates but wants to change them all uniformly.
-An example of this is provided in the following code:
+`UnitaryGates.batch_gate_error` controls how this perturbation behaves across batched inputs. By default, each batch element gets its own draw; the other setting shares one draw for a given gate across the batch. This is useful when samples should see the same gate error:
 
 ```python
 import jax
@@ -62,7 +57,7 @@ rho = jaqsi.Script(circuit, n_qubits=2).execute(
 
 ## Randomness under JAX transformations
 
-Gate errors and shot sampling are the only parts of the simulation that draw random numbers at runtime, as the decoherent channels above are deterministic maps on the density matrix.
+Gate errors and shot sampling draw random numbers at runtime. The other noise channels above are deterministic maps on density matrices, even though they represent physical noise.
 
 Inside a JAX transformation a key captured as a constant does not work: a jitted function is traced once, so the compiled function replays the same noise realization on every call.
 To get fresh randomness, pass the key explicitly as an argument and advance it outside the transformation:

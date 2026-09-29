@@ -1041,37 +1041,19 @@ class QOC:
     ) -> Tuple[jnp.ndarray, Optional[Tuple[List[jnp.ndarray], list]]]:
         """Run the coarse grid-scan phase (Stage 0).
 
-        Evaluates a Cartesian grid of parameter candidates using the
-        **full weighted cost** (fidelity + phase, plus any other
-        registered terms) — the same objective as Stage 1.  Each
-        candidate is refined with a few fast gradient steps.  Returns
-        the best-found parameters.
-
-        Sharing the objective with Stage 1 prevents the grid scan from
-        landing in a basin that has high fidelity but a biased phase
-        which Adam then has to migrate out of (the previous
-        fidelity-only scan caused exactly this failure mode for RX/RY,
-        whose phase residuals compounded in the CRX decomposition).
-
-        Robustness: candidates that produce a non-finite loss (e.g. when
-        the underlying pulse drives the integrator into a NaN — typical
-        for very narrow DRAG envelopes) are skipped with a warning.  For
-        the duration of the scan, :class:`jaqsi.evolution.Evolution` is
-        switched into ``throw=False`` mode so a single bad candidate
-        cannot abort the loop with ``MaxStepsReached``; the previous
-        defaults are restored on exit.
+        Evaluate a parameter grid with the same weighted cost as Stage 1,
+        refine candidates with gradient steps, and return the best result.
+        Non-finite candidates are skipped. The solver temporarily uses
+        ``throw=False`` so a failed candidate does not abort the scan.
 
         Args:
             init_pulse_params: Initial pulse parameters to compare against.
             total_cost: Combined cost callable (same as Stage 1).
 
         Returns:
-            Tuple of:
-            - Best pulse parameters found during the scan.
-            - ``(grid_axes, landscape_data)`` if the grid scan ran, else
-              ``None``.  ``landscape_data`` is a list of
-              ``(candidate_index, original_params, loss)`` tuples for
-              every successful scan candidate.
+            Best parameters and optional grid data. Grid data contains the
+            axes and successful ``(candidate_index, original_params, loss)``
+            records.
         """
 
         def total_cost_log(log_params, *args):

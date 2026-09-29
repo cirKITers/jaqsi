@@ -1,10 +1,4 @@
-"""Memory estimation and memory-aware batch chunking.
-
-These helpers let :class:`~jaqsi.script.Script` decide whether a batched
-simulation fits in available RAM and, if not, split it into chunks that do.  They
-are pure functions (the estimates are plain Python arithmetic) so they add
-essentially zero overhead when the full batch fits.
-"""
+"""Estimate simulation memory and split large batches into chunks."""
 
 from typing import Callable, Tuple
 
@@ -24,12 +18,9 @@ CLEAR_CACHES_BETWEEN_CHUNKS: bool = False
 
 
 def _cache_bytes_per_cpu(default: int = 8 * 1024**2) -> int:
-    """Last-level (L3) cache share of one CPU, read from Linux sysfs.
+    """Return one CPU's share of L3 cache from Linux sysfs.
 
-    The L3 size is divided by the number of CPUs sharing it.  Virtual machines
-    may report a per-vCPU cache that the host actually shares; override
-    :data:`CACHE_BYTES` in that case.  Falls back to *default* when sysfs is
-    unavailable.
+    Return *default* if sysfs is unavailable.
     """
     base = "/sys/devices/system/cpu/cpu0/cache/index3"
     try:
@@ -51,19 +42,12 @@ def _cache_bytes_per_cpu(default: int = 8 * 1024**2) -> int:
 # Cache budget for one batch tile, see :func:`tile_size`.
 CACHE_BYTES: int = _cache_bytes_per_cpu()
 
-# Budget for the pulse solves of one batch tile, see :func:`tile_size`.  Their
-# loops run hundreds of small operations per step, which XLA splits over its
-# intra-op threads once a tile is large enough, at a cost.  Three RY solves per
-# sample, 432,000 samples, 16-vCPU VM: 1 MiB instead of 256 KiB costs 1.25x for
-# one unpinned process and 2x for 16 at once; from 32 KiB to 512 KiB the time
-# stays within 10 %.  256 KiB also fits the private L2 of current cores.
+# Budget for pulse solves in one batch tile; see :func:`tile_size`.
 SOLVE_CACHE_BYTES: int = 256 * 1024
 
 # Amplitudes per batch (batch size times ``2**n`` for statevectors, ``4**n``
 # for density matrices) below which a batch is not split over devices: under
-# it, the dispatch to each device costs more than the split saves.  The
-# break-even follows the batch's total size rather than the qubit count: about
-# ``2**14`` for a forward pass and ``2**12`` for a gradient, from n=4 to n=10.
+# it, dispatch overhead can exceed the benefit of splitting the work.
 SHARD_MIN_SIZE: int = 2**13
 
 
@@ -102,35 +86,13 @@ def estimate_peak_bytes(
     use_density: bool,
     n_obs: int = 0,
 ) -> int:
-    """Estimate peak memory (bytes) for a batched simulation.
+    """Estimate peak memory in bytes for a batched simulation.
 
-    The estimate is the larger of the simulation scratch and the returned
-    output tensor.  The scratch is a fixed number of batched buffers,
-    independent of circuit depth, taken from XLA's compiled peak (CPU, JAX
-    0.11): a forward statevector run needs two ``(B, dim)`` buffers and the
-    adjoint gradient of an expectation value eight, so eight are budgeted;
-    density-matrix simulation needs five ``(B, dim, dim)`` buffers.
-
-    Gradients taken with a tape (noisy circuits, state or probability
-    outputs) hold about one buffer per gate, but chunking cannot bound them:
-    reverse mode keeps every chunk's residuals until the backward pass runs.
-    They are therefore not part of the estimate.
-
-    Observable matrices are **not** counted: they are computed inside
-    the JIT-compiled function and XLA manages their lifetime (reusing
-    buffers between observables).  Similarly, the outer-product
-    temporary for a density output of a pure circuit is transient within XLA.
-
-    Element size is determined dynamically from ``jax.config.x64_enabled``:
-    when x64 mode is disabled (the JAX default), complex values are
-    ``complex64`` (8 bytes) and floats are ``float32`` (4 bytes),
-    halving memory usage compared to the x64 path.
-
-    A 1.5× safety factor is applied to cover XLA compiler temporaries,
-    padding, and other allocations not directly visible to Python.
-
-    This is a pure Python arithmetic calculation with no JAX calls —
-    it adds essentially zero overhead.
+    Budget eight statevectors or five density matrices per batch element,
+    whichever applies, then compare against output size. Element sizes follow
+    the active JAX precision. A 1.5× margin covers compiler temporaries.
+    Reverse-mode residuals for non-adjoint gradients are not included because
+    chunking cannot bound their lifetime.
 
     Args:
         n_qubits: Number of qubits in the circuit.
@@ -348,18 +310,9 @@ def execute_chunked(
     chunk_size: int,
     clear_caches: bool = False,
 ) -> jnp.ndarray:
-    """Execute a vmapped function in memory-safe chunks.
+    """Run a vmapped function in chunks and collect the results.
 
-    Splits the batch dimension into sub-batches of at most *chunk_size*
-    elements, runs each through the JIT-compiled *batched_fn*, and
-    writes results into a pre-allocated output array.
-
-    Only one chunk's intermediate result is alive at a time: each
-    chunk is computed, copied into the output buffer, and then its
-    reference is dropped — allowing JAX/XLA to reclaim the memory
-    before the next chunk starts.  This keeps peak memory at roughly
-    ``output_buffer + one_chunk_computation`` rather than the sum of
-    all chunk outputs.
+    At most one chunk's intermediate result is retained at a time.
 
     Args:
         batched_fn: A JIT-compiled, vmapped callable.
