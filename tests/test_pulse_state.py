@@ -314,12 +314,13 @@ def test_drag_drives_a_second_quadrature():
 ENVELOPES = [name for name in PulseEnvelope.available() if name != "general"]
 
 
-@pytest.mark.parametrize("envelope", ENVELOPES)
+@pytest.mark.parametrize("envelope", [e for e in ENVELOPES if e != "drag_legacy"])
 def test_envelopes_are_centred_at_the_pulse_midpoint(envelope):
     """Every envelope peaks at ``T / 2`` and is symmetric around it.
 
     The DRAG quadrature ``-beta dE/dt`` is odd around the centre instead, so
-    that its area vanishes.
+    that its area vanishes.  ``drag_legacy`` keeps the running centre ``t / 2``
+    of earlier versions on purpose.
     """
     PulseInformation.set_envelope(envelope, rwa=True)
     pp = PulseInformation.RX.params

@@ -400,6 +400,25 @@ class PulseEnvelope:
         A, sigma = p[0], p[1]
         return A / jnp.cosh((t - t_c) / sigma)
 
+    @staticmethod
+    def drag_legacy(p, t, t_c):
+        """Pulse model of ``drag`` up to jaqsi 2a9132f. ``p = [A, beta, sigma]``.
+
+        Reproduces results obtained with those versions, e.g. earlier
+        pulse-level studies, with their calibrated defaults (not recalibrated).
+        The envelope ``g + beta * dg``, with ``g = A exp(-(t - t_c')^2 /
+        (2 sigma^2))`` and ``dg = -(t - t_c') / sigma**2 * g``, drives a single
+        quadrature, so this is not DRAG in the sense of Motzoi et al.  The
+        centre is the running ``t_c' = t / 2`` of those versions: the ``t_c``
+        argument is ignored and, for ``beta >= 0``, the envelope decays from
+        ``A`` at ``t = 0`` instead of peaking at the pulse midpoint.
+        """
+        A, beta, sigma = p[0], p[1], p[2]
+        t_c = t / 2
+        g = A * jnp.exp(-0.5 * ((t - t_c) / sigma) ** 2)
+        dg = g * (-(t - t_c) / sigma**2)
+        return g + beta * dg
+
     # ``n_envelope_params`` counts only the envelope parameters (excluding
     # the evolution time ``t`` which is always the last element of the full
     # pulse parameter vector).
@@ -472,6 +491,28 @@ class PulseEnvelope:
                 ),
                 "RY": jnp.array(
                     [1.18559023969428, 1.5022530879336038, 0.8547640992860961]
+                ),
+            },
+        },
+        "drag_legacy": {
+            "fn": drag_legacy.__func__,
+            "n_envelope_params": 3,
+            "defaults": {
+                "RX": jnp.array(
+                    [
+                        0.326562746114197,
+                        0.4002767596709071,
+                        5.3228107728890315,
+                        3.141300761986467,
+                    ]
+                ),
+                "RY": jnp.array(
+                    [
+                        0.323287924190616,
+                        0.4065017233024265,
+                        7.00299644871222,
+                        3.139481229843545,
+                    ]
                 ),
             },
         },
@@ -555,7 +596,8 @@ class PulseEnvelope:
         The parameter array is ``p = [envelope params..., T, w]``: the
         rotation angle ``w`` is its last element and the pulse duration
         ``T`` the one before.  Every envelope is centred at the pulse
-        midpoint ``t_c = T / 2`` of the integration window ``[0, T]``.
+        midpoint ``t_c = T / 2`` of the integration window ``[0, T]``
+        (except :meth:`drag_legacy`, which ignores ``t_c``).
 
         Args:
             envelope_fn: Pure envelope function ``(p, t, t_c) -> scalar``.

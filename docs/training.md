@@ -143,11 +143,11 @@ pulse_params = PulseInformation.gate_by_name("RX").params * 1.15
 opt = optax.adam(0.01)
 opt_state = opt.init(pulse_params)
 
-for _ in range(30):
+for _ in range(200):
     loss, grads = jax.value_and_grad(infidelity)(pulse_params)
     updates, opt_state = opt.update(grads, opt_state, pulse_params)
     pulse_params = optax.apply_updates(pulse_params, updates)
-# infidelity 6.3e-02 -> ~1e-03
+# infidelity 6.3e-02 -> ~1e-10
 ```
 
 That is the basic idea: gradients flow through the pulse ODE solver too. For full gate calibration, use `QOC`, which adds a multi-objective

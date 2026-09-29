@@ -75,7 +75,7 @@ Each pulse is shaped by an envelope. The available envelopes can be queried with
 from jaqsi.gates import PulseEnvelope
 
 print(PulseEnvelope.available())
-# ['gaussian', 'square', 'cosine', 'drag', 'sech', 'general']
+# ['gaussian', 'square', 'cosine', 'drag', 'sech', 'drag_legacy', 'general']
 ```
 
 The default is `gaussian`. The envelope is a process-global setting, switched with `PulseInformation.set_envelope("drag")`.
@@ -100,6 +100,8 @@ Under the RWA, `RX(w)` then evolves under $\frac{w}{2}\left(E X + Q Y\right)$ an
 Note that jaqsi models qubits as two-level systems, so there is no leakage level for the quadrature to suppress.
 As $E$ is symmetric around $T/2$, $Q$ is odd around it and adds no net area, but it does not commute with the in-phase drive and adds an error about the $Z$ axis whose angle grows as $\beta w^2$, the second term of the [Magnus expansion](https://doi.org/10.1016/j.physrep.2008.11.001).
 Under the RWA, the Gaussian alone already implements the target rotation, which is why the calibrated defaults have $\beta \approx 0$ (below $10^{-12}$) and `drag` then reproduces `gaussian`.
+
+For backward compatibility, `drag_legacy` restores the pulse model of `drag` up to jaqsi 2a9132f, to reproduce results obtained with those versions.
 
 Pulse gates integrate a time-dependent Hamiltonian. Configure the solver with `Evolution.set_solver_defaults`; available solvers are `"dopri8"` (default), `"dopri5"`, `"magnus2"`, and `"magnus4"`:
 
