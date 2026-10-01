@@ -413,7 +413,9 @@ class Evolution:
 
         def _apply(t: float, wires: Union[int, List[int]] = 0) -> Operation:
             U = jax.scipy.linalg.expm(-1j * t * H_mat)
-            return Operation(wires=wires, matrix=U, name=name)
+            op = Operation(wires=wires, matrix=U, name=name)
+            op.is_unitary = True
+            return op
 
         return _apply
 
@@ -625,6 +627,10 @@ class PendingEvolution(Operation):
     ``jax.vmap`` call per pulse shape; reading :attr:`matrix` before that
     solves this gate on its own.
     """
+
+    # Unitary up to solver tolerance for the adaptive integrators, exactly
+    # for the Magnus ones.
+    is_unitary = True
 
     def __init__(
         self,

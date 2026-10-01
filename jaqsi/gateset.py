@@ -15,6 +15,7 @@ import numpy as np
 
 from jaqsi.operations import (
     Operation,
+    GateStructure,
     Hermitian,
     cdtype,
 )
@@ -30,6 +31,8 @@ class Id(Operation):
 
     _matrix = jnp.eye(2, dtype=cdtype())
     _num_wires = None  # accept any number of wires
+    _structure = GateStructure(diagonal=True)
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -45,6 +48,8 @@ class Id(Operation):
         if k > 1:
             kwargs["matrix"] = jnp.eye(2**k, dtype=cdtype())
         super().__init__(wires=wires, **kwargs)
+        if k > 1:
+            self._structure = GateStructure(diagonal=True)
 
 
 class PauliX(Operation):
@@ -52,6 +57,8 @@ class PauliX(Operation):
 
     _matrix = jnp.array([[0, 1], [1, 0]], dtype=cdtype())
     _num_wires = 1
+    _structure = GateStructure(permutation=(1, 0))
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -68,6 +75,7 @@ class PauliY(Operation):
 
     _matrix = jnp.array([[0, -1j], [1j, 0]], dtype=cdtype())
     _num_wires = 1
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -84,6 +92,8 @@ class PauliZ(Operation):
 
     _matrix = jnp.array([[1, 0], [0, -1]], dtype=cdtype())
     _num_wires = 1
+    _structure = GateStructure(diagonal=True)
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -100,6 +110,7 @@ class H(Operation):
 
     _matrix = jnp.array([[1, 1], [1, -1]], dtype=cdtype()) / jnp.sqrt(2)
     _num_wires = 1
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -120,6 +131,8 @@ class S(Operation):
 
     _matrix = jnp.array([[1, 0], [0, 1j]], dtype=cdtype())
     _num_wires = 1
+    _structure = GateStructure(diagonal=True)
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0) -> None:
@@ -138,6 +151,8 @@ class SWAP(Operation):
         [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=cdtype()
     )
     _num_wires = 2
+    _structure = GateStructure(permutation=(0, 2, 1, 3))
+    is_unitary = True
     is_clifford = True
 
     def __init__(self, wires: Union[int, List[int]] = 0, **kwargs) -> None:
@@ -203,6 +218,7 @@ class DiagonalQubitUnitary(Operation):
     # Do NOT list "diag" in _param_names — the array is not a scalar
     # parameter and would break drawing helpers that call float(p).
     _param_names = ()
+    is_unitary = True
 
     def __init__(
         self,
@@ -231,6 +247,7 @@ class DiagonalQubitUnitary(Operation):
         # Use a descriptive name for drawing
         kwargs.setdefault("name", "DiagU")
         super().__init__(wires=wires, matrix=mat, **kwargs)
+        self._structure = GateStructure(diagonal=True)
 
     def decompose(self) -> List["Operation"]:
         r"""Expand a real-generator diagonal encoding into Pauli-Z rotations.
@@ -401,6 +418,7 @@ def _make_rotation_gate(pauli_class: type, name: str) -> type:
             f"exp(-i \\theta/2 {name[1]}).\n"
         )
         _num_wires = 1
+        is_unitary = True
         _param_names = ("theta",)
 
         def __init__(
@@ -409,6 +427,7 @@ def _make_rotation_gate(pauli_class: type, name: str) -> type:
             self.theta = theta
             mat = _rot_matrix(theta, pauli_mat)
             super().__init__(wires=wires, matrix=mat, **kwargs)
+            self._structure = GateStructure(diagonal=pauli_class is PauliZ)
 
         def generator(self) -> Operation:
             """Return the generator as the corresponding Pauli operation."""
@@ -452,7 +471,13 @@ def _make_controlled_gate(target_class: type, name: str) -> type:
         )
         _matrix = jnp.kron(_P0, Id._matrix) + jnp.kron(_P1, target_mat)
         _num_wires = 2
+        is_unitary = True
         is_controlled = True
+        _structure = GateStructure(
+            permutation=(0, 1, 3, 2) if target_class is PauliX else (),
+            diagonal=target_class is PauliZ,
+            controls=1,
+        )
         is_clifford = True  # CX, CY, CZ are all Clifford gates
 
         def __init__(self, wires: List[int] = [0, 1], **kwargs) -> None:
@@ -503,6 +528,8 @@ class CCX(Operation):
     )
     is_controlled = True
     _num_wires = 3
+    _structure = GateStructure(permutation=(0, 1, 2, 3, 4, 5, 7, 6), controls=2)
+    is_unitary = True
 
     def __init__(self, wires: List[int] = [0, 1, 2], **kwargs) -> None:
         """Initialise a Toffoli (CCX) gate.
@@ -537,6 +564,8 @@ class CSWAP(Operation):
     )
     is_controlled = True
     _num_wires = 3
+    _structure = GateStructure(permutation=(0, 1, 2, 3, 4, 6, 5, 7), controls=1)
+    is_unitary = True
 
     def __init__(self, wires: List[int] = [0, 1, 2], **kwargs) -> None:
         """Initialise a Controlled-SWAP (Fredkin) gate.
@@ -564,6 +593,7 @@ class ControlledPhaseShift(Operation):
     """
 
     _num_wires = 2
+    is_unitary = True
     _param_names = ("phi",)
     is_controlled = True
 
@@ -578,6 +608,7 @@ class ControlledPhaseShift(Operation):
         phase_gate = jnp.array([[1, 0], [0, jnp.exp(1j * phi)]], dtype=cdtype())
         mat = jnp.kron(_P0, Id._matrix) + jnp.kron(_P1, phase_gate)
         super().__init__(wires=wires, matrix=mat, **kwargs)
+        self._structure = GateStructure(diagonal=True, controls=1)
 
 
 class Rot(Operation):
@@ -589,6 +620,7 @@ class Rot(Operation):
     """
 
     _num_wires = 1
+    is_unitary = True
     _param_names = ("phi", "theta", "omega")
 
     def __init__(
@@ -641,6 +673,7 @@ class PauliRot(Operation):
     """
 
     _param_names = ("theta",)
+    is_unitary = True
 
     # Map from character to 2x2 matrix (canonical single source of truth)
     _PAULI_MAP = _PAULI_MATRICES
@@ -662,6 +695,7 @@ class PauliRot(Operation):
         P = _pauli_tensor(pauli_word)
         mat = _rot_matrix(theta, P)
         super().__init__(wires=wires, matrix=mat, **kwargs)
+        self._structure = GateStructure(diagonal=set(pauli_word) <= {"I", "Z"})
 
     def generator(self) -> Operation:
         """Return the generator Pauli tensor product as an :class:`Operation`.
@@ -734,6 +768,7 @@ class ControlledPauliRot(Operation):
     """
 
     _param_names = ("theta",)
+    is_unitary = True
     is_controlled = True
 
     def __init__(
@@ -770,6 +805,9 @@ class ControlledPauliRot(Operation):
         mat = mat.at[start : start + d_t, start : start + d_t].set(R)
 
         super().__init__(wires=wires_list, matrix=mat, **kwargs)
+        self._structure = GateStructure(
+            diagonal=set(pauli_word) <= {"I", "Z"}, controls=n_controls
+        )
 
     def generator(self) -> Operation:
         """Return the (Hermitian) generator on the full wire set."""

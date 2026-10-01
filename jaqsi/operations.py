@@ -7,7 +7,7 @@ time-evolution sources.  The concrete gate library lives in
 symbolic Pauli/Clifford layer in :mod:`jaqsi.paulis`.
 """
 
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, NamedTuple, Optional, Tuple, Union
 from functools import lru_cache
 import string
 import numpy as np
@@ -155,6 +155,18 @@ def _permute_matrix(mat: jnp.ndarray, perm: list, n_qubits: int) -> jnp.ndarray:
     return tensor.reshape(dim, dim)
 
 
+class GateStructure(NamedTuple):
+    """Static matrix guarantees; permutations map output rows to input columns.
+
+    Controls are leading wires, active only when all are one. An empty
+    descriptor makes no guarantees and uses the dense application kernel.
+    """
+
+    permutation: Tuple[int, ...] = ()
+    diagonal: bool = False
+    controls: int = 0
+
+
 class Operation:
     """Base class for any quantum operation or observable.
 
@@ -175,13 +187,20 @@ class Operation:
             of wires is accepted.
         _param_names: Tuple of attribute names for the gate parameters.
             Used by :attr:`parameters` and :meth:`__repr__`.
+        is_unitary: Whether the matrix is unitary.  Adjoint differentiation
+            (see :func:`jaqsi.simulation.simulate_and_measure`) inverts gates
+            by their conjugate transpose, so it is only taken when every gate
+            on the tape sets this.  Off by default; the gate library sets it.
     """
 
     # Subclasses should set this to the gate's unitary / matrix
     # Whether this is a controlled operation
     is_controlled = False
+    _structure = GateStructure()
     # Whether this gate is a Clifford gate (normalises the Pauli group
     is_clifford = False
+    # Whether the matrix is unitary (see the class docstring)
+    is_unitary = False
 
     _matrix: jnp.ndarray = None
     _num_wires: Optional[int] = None
@@ -225,6 +244,7 @@ class Operation:
 
         if matrix is not None:
             self._matrix = matrix
+            self._structure = GateStructure()
 
         # If a tape is currently recording, append ourselves
         if record:
@@ -349,6 +369,12 @@ class Operation:
         """
         mat = jnp.conj(self.matrix).T
         op = Operation(wires=self.wires, matrix=mat, record=False)
+        op.is_unitary = self.is_unitary
+        structure = self._structure
+        permutation = structure.permutation
+        if permutation:
+            permutation = tuple(permutation.index(i) for i in range(len(permutation)))
+        op._structure = structure._replace(permutation=permutation)
 
         self._update_tape_operation(op)
 
@@ -366,6 +392,7 @@ class Operation:
         # TODO: support fractional powers
         mat = jnp.linalg.matrix_power(self.matrix, power)
         op = Operation(wires=self.wires, matrix=mat, record=False)
+        op.is_unitary = self.is_unitary
 
         self._update_tape_operation(op)
 
@@ -456,9 +483,11 @@ class Operation:
             mat = mat @ mat_other
 
         op_names = "*".join(op.name for op in all_ops)
-        return Operation(
+        op = Operation(
             wires=all_wires, matrix=mat, name=f"Prod({op_names})", record=False
         )
+        op.is_unitary = all(o.is_unitary for o in all_ops)
+        return op
 
     def __matmul__(self, other: "Operation") -> "Operation":
         """Tensor (Kronecker) product or matrix product of two operations.

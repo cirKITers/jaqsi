@@ -106,6 +106,10 @@ Evolution.set_solver_defaults(solver="magnus4", magnus_steps=128)
 
 The `magnus_steps` argument sets the number of fixed substeps for the Magnus integrators and is ignored for the adaptive Dormand-Prince solvers (`dopri8`, `dopri5`).
 
+The Magnus integrators return exactly unitary gates, the Dormand-Prince solvers only up to their tolerance (about 1e-10 per gate in double precision).
+This matters for gradients of expectation values, which are computed with the adjoint method (see [training](training.md#how_gradients_are_computed)) and reconstruct intermediate states by inverting gates as unitaries.
+The resulting error grows linearly with the number of pulse gates, so for circuits with thousands of them prefer a Magnus solver.
+
 Note that pulse gates are solved lazily when the circuit is simulated.
 This means that all gates of a tape that share a pulse shape are integrated in one batched solve, and gates with identical parameters (the same fixed-angle rotation on several wires, every CZ) are solved only once.
 This keeps compile times short and matters most on a GPU, where each separate solve costs a few milliseconds of launch latency.
