@@ -1260,16 +1260,20 @@ class PulseGates:
         #   H_I(τ) = Ω(τ)·cos(ω_c·τ) · [ cos(ω_q·τ)·X − sin(ω_q·τ)·Y ]
         # which on resonance averages (RWA) to +(Ω/2)·X while the
         # 2·ω_q counter-rotating part oscillates and cancels.
+        # Under the RWA the Y component vanishes; the X term alone is solved
+        # in closed form (see :meth:`Evolution._evolve_parametrized`).
         H_X = Hamiltonian(PulseGates.X, wires=wires)
         H_Y = Hamiltonian(PulseGates.Y, wires=wires)
-        H_eff = PulseGates._coeff_RX_X * H_X + PulseGates._coeff_RX_Y * H_Y
+        H_eff = PulseGates._coeff_RX_X * H_X
+        if not PulseGates._active_rwa:
+            H_eff = H_eff + PulseGates._coeff_RX_Y * H_Y
 
         # Pack: [envelope_params..., w] - evolution time is the last element
         # of pulse_params (pulse_params[-1]).
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
         env_params = _pack_params(pulse_params, slice(None, -1), w)
-        # Both terms share the same parameter array.
-        H_eff.evolve(name="RX")([env_params, env_params], t)
+        # All terms share the same parameter array.
+        H_eff.evolve(name="RX")([env_params] * H_eff.n_terms, t)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -1297,15 +1301,18 @@ class PulseGates:
 
         # See NOTE in RX: same proper interaction-picture form, with
         # carrier phase ϕ = +π/2 so the slow RWA component drives +Y.
+        # Under the RWA the X component vanishes, as in RX.
         H_X = Hamiltonian(PulseGates.X, wires=wires)
         H_Y = Hamiltonian(PulseGates.Y, wires=wires)
-        H_eff = PulseGates._coeff_RY_X * H_X + PulseGates._coeff_RY_Y * H_Y
+        H_eff = PulseGates._coeff_RY_Y * H_Y
+        if not PulseGates._active_rwa:
+            H_eff = PulseGates._coeff_RY_X * H_X + H_eff
 
         # Pack w into the params so the coefficient function doesn't need
         # a closure - this enables JIT solver cache sharing across all RY calls.
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
         env_params = _pack_params(pulse_params, slice(None, -1), w)
-        H_eff.evolve(name="RY")([env_params, env_params], t)
+        H_eff.evolve(name="RY")([env_params] * H_eff.n_terms, t)
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod

@@ -24,6 +24,7 @@ import jax.scipy.linalg
 from jax.experimental.compute_on import compute_on
 import equinox as eqx
 
+from jaqsi import memory
 from jaqsi.operations import (
     Hermitian,
     ParametrizedHamiltonian,
@@ -85,12 +86,18 @@ class Evolution:
     # call and loses above; hence opt-in.  Works for forward simulation
     # under ``jit``/``vmap`` and for an eager ``jax.grad``; XLA (jax 0.9)
     # fails to compile the offloaded loop inside ``jax.jit(jax.grad(...))``.
+    #
+    # ``closed_form`` lets the adaptive solvers integrate only the scalar
+    # pulse area of a single-term drive with a concrete matrix (see
+    # :meth:`_build_closed_form_evolve_solver`).  Switching it off integrates
+    # such drives as a matrix ODE like every other Hamiltonian.
     _solver_defaults: dict = {
         "max_steps": 2**13,
         "throw": True,
         "solver": "dopri8",
         "magnus_steps": 256,
         "host_offload": False,
+        "closed_form": True,
     }
     _valid_solvers = ("dopri8", "dopri5", "magnus2", "magnus4")
 
@@ -102,6 +109,7 @@ class Evolution:
         solver: Optional[str] = None,
         magnus_steps: Optional[int] = None,
         host_offload: Optional[bool] = None,
+        closed_form: Optional[bool] = None,
     ) -> dict:
         """Update class-level solver defaults; return the previous values.
 
@@ -116,6 +124,8 @@ class Evolution:
             host_offload: Solve the pulse ODEs on the host CPU while the
                 circuit runs on the accelerator (ignored if ``None``).  Not
                 supported inside ``jax.jit(jax.grad(...))``.
+            closed_form: Solve single-term drives in closed form (ignored if
+                ``None``).  ``False`` integrates them as a matrix ODE.
 
         Returns:
             Dictionary with the previous values of the updated keys.
@@ -140,6 +150,9 @@ class Evolution:
         if host_offload is not None:
             prev["host_offload"] = cls._solver_defaults["host_offload"]
             cls._solver_defaults["host_offload"] = bool(host_offload)
+        if closed_form is not None:
+            prev["closed_form"] = cls._solver_defaults["closed_form"]
+            cls._solver_defaults["closed_form"] = bool(closed_form)
         return prev
 
     @classmethod
@@ -184,7 +197,10 @@ class Evolution:
         magnus_steps = int(
             odeint_kwargs.pop("magnus_steps", cls._solver_defaults["magnus_steps"])
         )
-        return atol, rtol, max_steps, throw, solver_name, magnus_steps
+        closed_form = bool(
+            odeint_kwargs.pop("closed_form", cls._solver_defaults["closed_form"])
+        )
+        return atol, rtol, max_steps, throw, solver_name, magnus_steps, closed_form
 
     @classmethod
     def _build_magnus_evolve_solver(
@@ -346,6 +362,59 @@ class Evolution:
         return cls._store_evolve_solver(cache_key, _solve)
 
     @classmethod
+    def _build_closed_form_evolve_solver(
+        cls,
+        cache_key: tuple,
+        coeff_fn: Callable,
+        atol: float,
+        rtol: float,
+        max_steps: int,
+        throw: bool,
+        solver_name: str,
+        _rdtype,
+    ) -> Callable:
+        """Build and cache the solver for a single-term Hamiltonian ``f(p, t) H``.
+
+        Such a Hamiltonian commutes with itself at all times, so its propagator
+        is ``exp(-i F H)`` with ``F`` the integral of ``f`` over the pulse.  The
+        adaptive solver integrates the scalar ``F``, which takes as many steps as
+        the shape of ``f`` needs, while the matrix ODE needs more steps the
+        larger the rotation angle.
+        """
+        solver = diffrax.Dopri8() if solver_name == "dopri8" else diffrax.Dopri5()
+        stepsize_controller = diffrax.PIDController(atol=atol, rtol=rtol)
+
+        @eqx.filter_jit
+        def _solve(eigen, params, t0, t1):
+            """``eigen = (lam, V)`` holds the eigendecomposition of ``H``."""
+            lam, V = eigen
+            span = t1 - t0  # normalised time, as in the matrix ODE
+
+            def rhs(s, y, args):
+                return span * jnp.asarray(coeff_fn(args[0], t0 + s * span)).reshape(())
+
+            sol = diffrax.diffeqsolve(
+                diffrax.ODETerm(rhs),
+                solver,
+                t0=_rdtype(0.0),
+                t1=_rdtype(1.0),
+                dt0=None,
+                y0=jnp.zeros((), dtype=_rdtype),
+                args=params,
+                stepsize_controller=stepsize_controller,
+                max_steps=max_steps,
+                throw=throw,
+            )
+            U = (V * jnp.exp(-1j * sol.ys[0] * lam)) @ V.conj().T
+
+            if not throw:
+                successful = sol.result == diffrax.RESULTS.successful
+                U = jnp.where(successful, U, jnp.full_like(U, jnp.nan))
+            return U
+
+        return cls._store_evolve_solver(cache_key, _solve)
+
+    @classmethod
     def evolve(
         cls,
         hamiltonian: Union["Hermitian", "ParametrizedHamiltonian"],
@@ -451,6 +520,9 @@ class Evolution:
           ``einsum`` against the per-step coefficient vector
           ``c = [f_0(p_0,t), ..., f_{n-1}(p_{n-1},t)]``.
 
+        - A single term with a concrete matrix is solved in closed form by the
+          adaptive solvers, see :meth:`_build_closed_form_evolve_solver`.
+
         - The JIT-compiled solver is cached per coefficient-function code
           tuple (and ``dim``, tolerances) so multiple ``evolve()`` calls
           with the same pulse shape — but different Hamiltonian matrices
@@ -478,6 +550,10 @@ class Evolution:
                   raising; this is the recommended setting for inner
                   loops of an optimiser (e.g. QOC Stage 0) so a single
                   pathological candidate cannot abort the whole run.
+                - ``closed_form`` — whether a single term with a concrete
+                  matrix is solved in closed form (default
+                  :attr:`cls._solver_defaults['closed_form']`, currently
+                  ``True``).  ``False`` integrates it as a matrix ODE.
         """
         coeff_fns = ph.coeff_fns  # tuple of callables
         H_mats = ph.H_mats  # tuple of (dim, dim)
@@ -506,9 +582,25 @@ class Evolution:
             neg_iH_split = neg_iH_split.astype(np_rdtype)
 
         # Pick tolerances according to precision + some headroom
-        atol, rtol, max_steps, throw, solver_name, magnus_steps = (
+        atol, rtol, max_steps, throw, solver_name, magnus_steps, closed_form = (
             cls._parse_evolve_solver_options(odeint_kwargs)
         )
+
+        # A concrete single term is solved in closed form by the adaptive
+        # solvers.  Its eigenbasis is taken here, so that the unitary is
+        # differentiable in the pulse parameters alone: a traced
+        # eigendecomposition has no gradient at degenerate eigenvalues.
+        eigen = None
+        if (
+            closed_form
+            and n_terms == 1
+            and xp is np
+            and solver_name in ("dopri8", "dopri5")
+        ):
+            np_cdtype = np.complex128 if jax.config.x64_enabled else np.complex64
+            lam, V = np.linalg.eigh(np.asarray(H_mats[0]))
+            eigen = (lam.astype(np_rdtype), V.astype(np_cdtype))
+        solve_bytes = memory.solve_bytes(dim, solver_name, eigen is not None)
 
         # Cache key:  every coeff fn's code object (same shape of pulse
         # fns -> same JIT program) plus dim, tolerances, solver choice and
@@ -528,6 +620,7 @@ class Evolution:
             max_steps,
             solver_name,
             magnus_steps,
+            eigen is not None,
         )
 
         def solver_for(throw_flag: bool) -> Callable:
@@ -537,6 +630,17 @@ class Evolution:
                 _solve = cls._evolve_solver_cache.get(cache_key)
             if _solve is not None:
                 return _solve
+            if eigen is not None:
+                return cls._build_closed_form_evolve_solver(
+                    cache_key=cache_key,
+                    coeff_fn=coeff_fns[0],
+                    atol=atol,
+                    rtol=rtol,
+                    max_steps=max_steps,
+                    throw=throw_flag,
+                    solver_name=solver_name,
+                    _rdtype=_rdtype,
+                )
             if solver_name in ("magnus2", "magnus4"):
                 return cls._build_magnus_evolve_solver(
                     cache_key=cache_key,
@@ -612,7 +716,8 @@ class Evolution:
                 solver_for=solver_for,
                 throw=throw,
                 group_key=(base_key, throw, tuple(jnp.shape(p) for p in params)),
-                inputs=(neg_iH_split, params, t0, t1),
+                inputs=(neg_iH_split if eigen is None else eigen, params, t0, t1),
+                scratch_bytes=solve_bytes,
             )
 
         return _apply
@@ -640,12 +745,14 @@ class PendingEvolution(Operation):
         throw: bool,
         group_key: tuple,
         inputs: tuple,
+        scratch_bytes: int,
     ) -> None:
         super().__init__(wires=wires, name=name)
         self._solver_for = solver_for
         self._throw = throw
         self._group_key = group_key
         self._inputs = inputs
+        self._scratch_bytes = scratch_bytes  # per sample, see memory.solve_bytes
 
     @property
     def matrix(self) -> jnp.ndarray:
@@ -669,13 +776,8 @@ def resolve_pending(tape: List[Operation]) -> List[int]:
     Returns:
         Number of distinct solves per batched call.
     """
-    groups: Dict[tuple, List[PendingEvolution]] = {}
-    for op in tape:
-        if isinstance(op, PendingEvolution) and op._matrix is None:
-            groups.setdefault(op._group_key, []).append(op)
-
     sizes = []
-    for group in groups.values():
+    for group in _pending_groups(tape):
         # Identical gates (a repeated fixed-angle rotation, the same CZ on
         # several wire pairs) are solved once.  XLA deduplicated them across
         # sequential solves; stacked copies it cannot.
@@ -703,6 +805,28 @@ def resolve_pending(tape: List[Operation]) -> List[int]:
                 op._matrix = U[i]
 
     return sizes
+
+
+def _pending_groups(tape: List[Operation]) -> List[List[PendingEvolution]]:
+    """Unresolved pulse gates of *tape*, grouped by the solve they share."""
+    groups: Dict[tuple, List[PendingEvolution]] = {}
+    for op in tape:
+        if isinstance(op, PendingEvolution) and op._matrix is None:
+            groups.setdefault(op._group_key, []).append(op)
+    return list(groups.values())
+
+
+def scratch_bytes(tape: List[Operation]) -> int:
+    """Working set per sample of solving the pulse gates of *tape* in a batch.
+
+    :func:`resolve_pending` solves the groups one after another, so the largest
+    group sets it.  Every gate is counted as if it depended on the batch; the
+    others are solved once and cost less.
+    """
+    return max(
+        (sum(op._scratch_bytes for op in g) for g in _pending_groups(tape)),
+        default=0,
+    )
 
 
 def _on_host(fn: Callable) -> Callable:

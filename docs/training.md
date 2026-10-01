@@ -98,6 +98,7 @@ def mse(weights):
 For large batches `Script` also chunks the `vmap` automatically so that the peak memory
 stays within what is available (see `memory.py`).
 On CPU, it further runs the batch in tiles whose working set fits in the cache (`memory.CACHE_BYTES`, read from the L3 size; set it by hand on virtual machines, which may report a per-core cache that is actually shared).
+The ODE solves of pulse-level gates are held to a smaller budget, `memory.SOLVE_CACHE_BYTES` (256 KiB), since XLA's multi-threading slows their many small operations down once a tile is large.
 
 XLA's multi-threading barely speeds up a single circuit, but the samples of a batch are independent.
 To run them in parallel on CPU, expose the cores as JAX devices before JAX initialises:

@@ -106,7 +106,12 @@ Evolution.set_solver_defaults(solver="magnus4", magnus_steps=128)
 
 The `magnus_steps` argument sets the number of fixed substeps for the Magnus integrators and is ignored for the adaptive Dormand-Prince solvers (`dopri8`, `dopri5`).
 
-The Magnus integrators return exactly unitary gates, the Dormand-Prince solvers only up to their tolerance (about 1e-10 per gate in double precision).
+A drive with a single term, $H(t) = f(t)\,H$, commutes with itself at all times, so its gate is $e^{-i F H}$ with $F = \int f(t)\,dt$.
+The Dormand-Prince solvers then integrate the scalar $F$ only, which takes a handful of steps whatever the rotation angle, whereas the matrix ODE needs more steps the larger the angle.
+Under the RWA (the default) every pulse gate is such a drive; without it, `RX` and `RY` keep two non-commuting terms and are integrated as a matrix ODE.
+`Evolution.set_solver_defaults(closed_form=False)` integrates single-term drives as a matrix ODE as well, e.g. to compare against simulators that do not exploit this.
+
+The Magnus integrators and the single-term drives return exactly unitary gates, the Dormand-Prince solvers of the matrix ODE only up to their tolerance (about 1e-10 per gate in double precision).
 This matters for gradients of expectation values, which are computed with the adjoint method (see [training](training.md#how_gradients_are_computed)) and reconstruct intermediate states by inverting gates as unitaries.
 The resulting error grows linearly with the number of pulse gates, so for circuits with thousands of them prefer a Magnus solver.
 
