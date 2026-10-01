@@ -1,6 +1,6 @@
 [project]
 name = "jaqsi"
-version = "0.1.0"
+version = "0.1.1"
 description = "Just another quantum simulator: gate- and pulse-level simulation in JAX."
 authors = [
     { name = "Melvin Strobl", email = "melvin.strobl@kit.edu" },
