@@ -18,6 +18,11 @@ import jax.numpy as jnp
 from jaqsi.tape import active_tape, recording  # noqa: F401 (re-export)
 
 
+#: A gate matrix: an exact host constant (see :attr:`Operation._matrix`) or a
+#: JAX array, which during tracing is a tracer.
+Matrix = Union[np.ndarray, jnp.ndarray]
+
+
 def cdtype():
     """Return the active JAX complex dtype
     (complex128 if x64 enabled, else complex64).
@@ -179,9 +184,11 @@ class Operation:
     compute expectation values via ``apply_to_state`` / ``apply_to_density``.
 
     Attributes:
-        _matrix: Class-level default gate matrix.  Subclasses set this to their
-            fixed unitary.  Instances may override it via the *matrix* argument
-            to ``__init__``.
+        _matrix: Class-level default gate matrix, an exact NumPy array.  The
+            active JAX dtype is only known once a circuit runs, so
+            :attr:`matrix` casts it to :func:`cdtype` there rather than at
+            import time.  Subclasses set this to their fixed unitary; instances
+            may override it via the *matrix* argument to ``__init__``.
         _num_wires: Expected number of wires for this gate.  Subclasses set
             this to enforce wire count validation.  ``None`` means any number
             of wires is accepted.
@@ -202,14 +209,14 @@ class Operation:
     # Whether the matrix is unitary (see the class docstring)
     is_unitary = False
 
-    _matrix: jnp.ndarray = None
+    _matrix: Optional[Matrix] = None
     _num_wires: Optional[int] = None
     _param_names: Tuple[str, ...] = ()
 
     def __init__(
         self,
         wires: Union[int, List[int]] = 0,
-        matrix: Optional[jnp.ndarray] = None,
+        matrix: Optional[Matrix] = None,
         record: bool = True,
         name: Optional[str] = None,
     ) -> None:
@@ -289,7 +296,10 @@ class Operation:
         """Return the base matrix of this operation (before lifting).
 
         Returns:
-            The gate matrix as a JAX array.
+            The gate matrix as a JAX array in the active complex dtype (see
+            :func:`cdtype`).  The cast happens here, not where ``_matrix`` is
+            defined, so enabling ``jax_enable_x64`` after importing jaqsi still
+            gives complex128 gates.
 
         Raises:
             NotImplementedError: If the subclass has not defined ``_matrix``.
@@ -298,7 +308,7 @@ class Operation:
             raise NotImplementedError(
                 f"{self.__class__.__name__} does not define a matrix."
             )
-        return self._matrix
+        return jnp.asarray(self._matrix, dtype=cdtype())
 
     def decompose(self) -> List["Operation"]:
         """Decompose this operation into a list of more primitive operations.
@@ -627,7 +637,7 @@ class Hermitian(Operation):
 
     def __init__(
         self,
-        matrix: jnp.ndarray,
+        matrix: Matrix,
         wires: Union[int, List[int]] = 0,
         record: bool = True,
     ) -> None:
@@ -838,7 +848,7 @@ class ParametrizedHamiltonian:
 
 
 def Hamiltonian(
-    matrix: jnp.ndarray,
+    matrix: Matrix,
     wires: Union[int, List[int]] = 0,
     record: bool = False,
 ) -> Hermitian:

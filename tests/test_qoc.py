@@ -17,8 +17,6 @@ from jaqsi.qoc import (
     default_qoc_params,
 )
 
-jax.config.update("jax_enable_x64", True)
-
 
 def qoc_test_params(**overrides):
     """Return fast QOC defaults without mutating package-level defaults."""

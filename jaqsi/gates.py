@@ -20,15 +20,30 @@ import logging
 log = logging.getLogger(__name__)
 
 
+class _GateHandler:
+    """What ``Gates.<name>`` returns: a call to that gate, carrying its name.
+
+    A class rather than a closure, so that a circuit holding it (e.g. a model)
+    can be pickled.
+    """
+
+    def __init__(self, gates: "GatesMeta", gate_name: str):
+        self._gates = gates
+        self.__name__ = gate_name
+
+    def __call__(self, *args, **kwargs):
+        return self._gates._inner_getattr(self.__name__, *args, **kwargs)
+
+
 # Meta class to avoid instantiating the Gates class
 class GatesMeta(type):
     def __getattr__(cls, gate_name):
-        def handler(*args, **kwargs):
-            return cls._inner_getattr(gate_name, *args, **kwargs)
+        return _GateHandler(cls, gate_name)
 
-        # Dirty way to preserve information about the gate name
-        handler.__name__ = gate_name
-        return handler
+
+def _no_op(*args, **kwargs):
+    """Placeholder for an empty gate slot, e.g. no state preparation."""
+    return None
 
 
 def Barrier(wires: Union[int, List[int]], *args, **kwargs):
@@ -199,7 +214,7 @@ class Gates(metaclass=GatesMeta):
             # default to callable
             parsed_gates = [gates]
         elif gates is None:
-            parsed_gates = [lambda *args, **kwargs: None]
+            parsed_gates = [_no_op]
         else:
             raise ValueError(
                 f"Operation {gates} is not a valid gate or callable or list of both."

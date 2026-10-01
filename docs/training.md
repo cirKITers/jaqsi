@@ -16,10 +16,12 @@ import jax
 import jax.numpy as jnp
 import optax
 
+# Before importing jaqsi: gate matrices are cast to the active dtype, and
+# modules that build JAX arrays at import time bake the dtype in.
+jax.config.update("jax_enable_x64", True)
+
 import jaqsi
 from jaqsi import Gates
-
-jax.config.update("jax_enable_x64", True)
 
 
 def circuit(params):
@@ -95,6 +97,18 @@ def mse(weights):
 `mse` is then optimized with exactly the same `step` function as above.
 For large batches `Script` also chunks the `vmap` automatically so that the peak memory
 stays within what is available (see `memory.py`).
+On CPU, it further runs the batch in tiles whose working set fits in the cache (`memory.CACHE_BYTES`, read from the L3 size; set it by hand on virtual machines, which may report a per-core cache that is actually shared).
+
+XLA's multi-threading barely speeds up a single circuit, but the samples of a batch are independent.
+To run them in parallel on CPU, expose the cores as JAX devices before JAX initialises:
+
+```python
+jax.config.update("jax_num_cpu_devices", 8)  # before the first JAX computation
+```
+
+`Script` then splits every batch whose size is a multiple of the device count over all devices, once the batch holds at least `memory.SHARD_MIN_SIZE` amplitudes in total (batch size times `2**n`, `2**13` by default; below that the dispatch costs more than it saves).
+Other batches run on one device.
+Gradients through pulse-level gates also stay on one device, since diffrax's ODE loop cannot be reverse-differentiated inside `jax.shard_map` yet.
 
 ## How gradients are computed
 

@@ -4,6 +4,13 @@ Every gate here is an :class:`~jaqsi.operations.Operation` subclass carrying its
 own matrix definition, so instantiating one inside a circuit function records it
 on the active tape.  These are the matrix-level gates; the user-facing dispatch
 between unitary and pulse implementations lives in :mod:`jaqsi.gates`.
+
+Matrices that do not depend on a parameter are exact NumPy constants;
+:attr:`~jaqsi.operations.Operation.matrix` casts them to the active JAX dtype
+when the circuit runs.  Defining them with :func:`~jaqsi.operations.cdtype`
+here would instead pin the dtype to whatever it was when this module was
+imported, which silently costs precision for every gate with an irrational
+entry (H) once ``jax_enable_x64`` is enabled afterwards.
 """
 
 from typing import List, Optional, Union
@@ -17,6 +24,7 @@ from jaqsi.operations import (
     Operation,
     GateStructure,
     Hermitian,
+    Matrix,
     cdtype,
 )
 
@@ -29,7 +37,7 @@ class Id(Operation):
     number of wires).
     """
 
-    _matrix = jnp.eye(2, dtype=cdtype())
+    _matrix = np.eye(2, dtype=np.complex128)
     _num_wires = None  # accept any number of wires
     _structure = GateStructure(diagonal=True)
     is_unitary = True
@@ -46,7 +54,7 @@ class Id(Operation):
         w = list(wires) if isinstance(wires, (list, tuple)) else [wires]
         k = len(w)
         if k > 1:
-            kwargs["matrix"] = jnp.eye(2**k, dtype=cdtype())
+            kwargs["matrix"] = np.eye(2**k, dtype=np.complex128)
         super().__init__(wires=wires, **kwargs)
         if k > 1:
             self._structure = GateStructure(diagonal=True)
@@ -55,7 +63,7 @@ class Id(Operation):
 class PauliX(Operation):
     """Pauli-X gate / observable (bit-flip, \\sigma_x)."""
 
-    _matrix = jnp.array([[0, 1], [1, 0]], dtype=cdtype())
+    _matrix = np.array([[0, 1], [1, 0]], dtype=np.complex128)
     _num_wires = 1
     _structure = GateStructure(permutation=(1, 0))
     is_unitary = True
@@ -73,7 +81,7 @@ class PauliX(Operation):
 class PauliY(Operation):
     """Pauli-Y gate / observable (\\sigma_y)."""
 
-    _matrix = jnp.array([[0, -1j], [1j, 0]], dtype=cdtype())
+    _matrix = np.array([[0, -1j], [1j, 0]], dtype=np.complex128)
     _num_wires = 1
     is_unitary = True
     is_clifford = True
@@ -90,7 +98,7 @@ class PauliY(Operation):
 class PauliZ(Operation):
     """Pauli-Z gate / observable (phase-flip, \\sigma_z)."""
 
-    _matrix = jnp.array([[1, 0], [0, -1]], dtype=cdtype())
+    _matrix = np.array([[1, 0], [0, -1]], dtype=np.complex128)
     _num_wires = 1
     _structure = GateStructure(diagonal=True)
     is_unitary = True
@@ -108,7 +116,7 @@ class PauliZ(Operation):
 class H(Operation):
     """Hadamard gate."""
 
-    _matrix = jnp.array([[1, 1], [1, -1]], dtype=cdtype()) / jnp.sqrt(2)
+    _matrix = np.array([[1, 1], [1, -1]], dtype=np.complex128) / np.sqrt(2)
     _num_wires = 1
     is_unitary = True
     is_clifford = True
@@ -129,7 +137,7 @@ class S(Operation):
         S = \\begin{pmatrix}1 & 0\\ 0 & i\\end{pmatrix}
     """
 
-    _matrix = jnp.array([[1, 0], [0, 1j]], dtype=cdtype())
+    _matrix = np.array([[1, 0], [0, 1j]], dtype=np.complex128)
     _num_wires = 1
     _structure = GateStructure(diagonal=True)
     is_unitary = True
@@ -147,7 +155,7 @@ class S(Operation):
 class SWAP(Operation):
     """SWAP gate."""
 
-    _matrix = jnp.array(
+    _matrix = np.array(
         [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=cdtype()
     )
     _num_wires = 2
@@ -383,12 +391,12 @@ _PAULI_MATS = [_PAULI_MATRICES[label] for label in _PAULI_LABELS]
 _NAME_TO_PAULI_LABEL = {"PauliX": "X", "PauliY": "Y", "PauliZ": "Z", "I": "I"}
 
 
-def _pauli_tensor(word: str) -> jnp.ndarray:
+def _pauli_tensor(word: str) -> np.ndarray:
     """Tensor product of single-qubit Pauli matrices for a Pauli word."""
-    return reduce(jnp.kron, [_PAULI_MATRICES[c] for c in word])
+    return reduce(np.kron, [_PAULI_MATRICES[c] for c in word])
 
 
-def _rot_matrix(theta: float, pauli: jnp.ndarray) -> jnp.ndarray:
+def _rot_matrix(theta: float, pauli: Matrix) -> jnp.ndarray:
     """Return ``cos(theta/2) I - i sin(theta/2) P`` for a Pauli tensor *P*."""
     dim = pauli.shape[0]
     return (
@@ -444,8 +452,8 @@ RZ = _make_rotation_gate(PauliZ, "RZ")
 
 
 # Projectors used by controlled-gate factories
-_P0 = jnp.array([[1, 0], [0, 0]], dtype=cdtype())
-_P1 = jnp.array([[0, 0], [0, 1]], dtype=cdtype())
+_P0 = np.array([[1, 0], [0, 0]], dtype=np.complex128)
+_P1 = np.array([[0, 0], [0, 1]], dtype=np.complex128)
 
 
 def _make_controlled_gate(target_class: type, name: str) -> type:
@@ -469,7 +477,7 @@ def _make_controlled_gate(target_class: type, name: str) -> type:
             f"Applies {target_class.__name__} on the target qubit conditioned "
             f"on the control qubit being in state |1\\rangle."
         )
-        _matrix = jnp.kron(_P0, Id._matrix) + jnp.kron(_P1, target_mat)
+        _matrix = np.kron(_P0, Id._matrix) + np.kron(_P1, target_mat)
         _num_wires = 2
         is_unitary = True
         is_controlled = True
@@ -513,7 +521,7 @@ class CCX(Operation):
     simulator.
     """
 
-    _matrix = jnp.array(
+    _matrix = np.array(
         [
             [1, 0, 0, 0, 0, 0, 0, 0],
             [0, 1, 0, 0, 0, 0, 0, 0],
@@ -524,7 +532,7 @@ class CCX(Operation):
             [0, 0, 0, 0, 0, 0, 0, 1],
             [0, 0, 0, 0, 0, 0, 1, 0],
         ],
-        dtype=cdtype(),
+        dtype=np.complex128,
     )
     is_controlled = True
     _num_wires = 3
@@ -549,7 +557,7 @@ class CSWAP(Operation):
         wires: ``[control, target0, target1]``.
     """
 
-    _matrix = jnp.array(
+    _matrix = np.array(
         [
             [1, 0, 0, 0, 0, 0, 0, 0],
             [0, 1, 0, 0, 0, 0, 0, 0],
@@ -560,7 +568,7 @@ class CSWAP(Operation):
             [0, 0, 0, 0, 0, 1, 0, 0],
             [0, 0, 0, 0, 0, 0, 0, 1],
         ],
-        dtype=cdtype(),
+        dtype=np.complex128,
     )
     is_controlled = True
     _num_wires = 3
@@ -893,7 +901,7 @@ def build_parity_observable(
         tensor product and whose wires match the given qubits.
     """
     Z = PauliZ._matrix
-    mat = reduce(jnp.kron, [Z] * len(qubit_group))
+    mat = reduce(np.kron, [Z] * len(qubit_group))
     obs = Hermitian(matrix=mat, wires=qubit_group, record=False)
     # Tag the Pauli string so symbolic consumers (PauliWord / FourierTree) can
     # read it without an O(4^n) matrix decomposition.

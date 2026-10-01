@@ -9,8 +9,6 @@ from jaqsi import gateset as g
 from jaqsi.operations import Operation
 from jaqsi import simulation as sim
 
-jax.config.update("jax_enable_x64", True)
-
 
 def initial_state(n=4):
     state = jnp.arange(1, 2**n + 1) + 1j * jnp.arange(2**n, 0, -1)
@@ -38,9 +36,16 @@ def tape(p):
 
 
 def layered(p):
-    """A permutation layer and a diagonal layer, each spanning several wires."""
+    """A permutation layer and a diagonal layer, each spanning several wires.
+
+    The H layer fuses into the rotations on its wires, so the comparison also
+    covers a constant matrix with an irrational entry: the adjoint sweep
+    inverts it, and the reconstruction is only as unitary as the matrix is
+    exact (see the dtype test in ``test_jaqsi.py``).
+    """
     return (
-        [g.RY(p[i], i) for i in range(4)]
+        [g.H(i) for i in range(4)]
+        + [g.RY(p[i], i) for i in range(4)]
         + [g.CX([i, (i + 1) % 4]) for i in range(4)]
         + [g.RZ(p[i], i) for i in range(4)]
         + [g.SWAP([1, 2])]

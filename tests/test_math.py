@@ -1,4 +1,3 @@
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -13,8 +12,6 @@ from jaqsi.math import (
     phase_difference,
     logm_v,
 )
-
-jax.config.update("jax_enable_x64", True)
 
 
 # Reference definitions, computed with numpy on a different route than jaqsi.math.

@@ -8,8 +8,6 @@ import pytest
 from jaqsi import Operation, PauliZ
 from jaqsi.simulation import measure_state
 
-jax.config.update("jax_enable_x64", True)
-
 
 class DiagonalObservable(Operation):
     _matrix = np.diag([0.25, -1.75])

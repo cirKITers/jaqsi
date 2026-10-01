@@ -23,6 +23,42 @@ log = logging.getLogger(__name__)
 CLEAR_CACHES_BETWEEN_CHUNKS: bool = False
 
 
+def _cache_bytes_per_cpu(default: int = 8 * 1024**2) -> int:
+    """Last-level (L3) cache share of one CPU, read from Linux sysfs.
+
+    The L3 size is divided by the number of CPUs sharing it.  Virtual machines
+    may report a per-vCPU cache that the host actually shares; override
+    :data:`CACHE_BYTES` in that case.  Falls back to *default* when sysfs is
+    unavailable.
+    """
+    base = "/sys/devices/system/cpu/cpu0/cache/index3"
+    try:
+        with open(f"{base}/size") as f:
+            size = f.read().strip()
+        with open(f"{base}/shared_cpu_list") as f:
+            shared = f.read().strip()
+    except OSError:
+        return default
+    units = {"K": 1024, "M": 1024**2, "G": 1024**3}
+    n_bytes = int(size[:-1]) * units[size[-1]] if size[-1] in units else int(size)
+    n_cpus = 0
+    for part in shared.split(","):
+        lo, _, hi = part.partition("-")
+        n_cpus += int(hi or lo) - int(lo) + 1
+    return n_bytes // n_cpus
+
+
+# Cache budget for one batch tile, see :func:`tile_size`.
+CACHE_BYTES: int = _cache_bytes_per_cpu()
+
+# Amplitudes per batch (batch size times ``2**n`` for statevectors, ``4**n``
+# for density matrices) below which a batch is not split over devices: under
+# it, the dispatch to each device costs more than the split saves.  The
+# break-even follows the batch's total size rather than the qubit count: about
+# ``2**14`` for a forward pass and ``2**12`` for a gradient, from n=4 to n=10.
+SHARD_MIN_SIZE: int = 2**13
+
+
 def _element_sizes() -> Tuple[int, int]:
     """Return ``(complex_elem, real_elem)`` byte sizes for the active JAX dtype.
 
@@ -231,6 +267,33 @@ def compute_chunk_size(
         f"Using chunk size {chunk}."
     )
     return chunk
+
+
+def tile_size(n_qubits: int, batch_size: int, use_density: bool, reverse: bool) -> int:
+    """Batch tile whose working set fits in :data:`CACHE_BYTES`.
+
+    Every gate streams the whole batched state through memory, so once the live
+    buffers exceed the cache each pass is bound by RAM bandwidth.  Running the
+    batch in tiles that fit keeps them cache-resident.  The live buffers are the
+    compiled scratch of :func:`estimate_peak_bytes`: two statevectors for a
+    forward pass, eight when the adjoint gradient is taken (*reverse*), and five
+    density matrices.  Tiles are balanced, so ``batch_size`` splits into
+    near-equal parts.  Only the CPU backend is tiled.
+
+    Returns:
+        Tile size, ``batch_size`` when the batch fits or no tiling applies.
+    """
+    if jax.default_backend() != "cpu":
+        return batch_size
+    dim = 2**n_qubits
+    elem, _ = _element_sizes()
+    if use_density:
+        per_elem = 5 * dim * dim * elem
+    else:
+        per_elem = (8 if reverse else 2) * dim * elem
+    fit = max(1, CACHE_BYTES // per_elem)
+    n_tiles = -(-batch_size // fit)
+    return -(-batch_size // n_tiles)
 
 
 def execute_chunked(
