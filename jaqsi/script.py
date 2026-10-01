@@ -152,18 +152,10 @@ class _BatchPlan(NamedTuple):
 
 
 class Script:
-    """Circuit container and executor backed by pure JAX kernels.
+    """Record and execute a quantum circuit defined by a Python function.
 
-    ``Script`` takes a callable *f* representing a quantum circuit.
-    Within *f*, :class:`~jaqsi.operations.Operation` objects are
-    instantiated and automatically recorded onto a tape.  The tape is then
-    simulated using either a statevector or density-matrix kernel depending on
-    whether noise channels are present.
-
-    The stateless simulation/measurement kernels live in
-    :mod:`jaqsi.simulation` and the memory-estimation/chunking helpers
-    in :mod:`jaqsi.memory`; this class orchestrates recording,
-    batching, caching, and drawing around them.
+    Operations created by *f* are recorded on a tape. Noise channels select
+    density-matrix simulation; otherwise, the circuit uses a statevector.
 
     Attributes:
         f: The circuit function whose body instantiates ``Operation`` objects.
@@ -171,12 +163,6 @@ class Script:
             the qubit count is inferred from the operations recorded on the
             tape.
 
-    Example:
-        >>> def circuit(theta):
-        ...     RX(theta, wires=0)
-        ...     PauliZ(wires=1)
-        >>> script = Script(circuit, n_qubits=2)
-        >>> result = script.execute(type="expval", obs=[PauliZ(0)])
     """
 
     def __init__(self, f: Callable[..., None], n_qubits: Optional[int] = None) -> None:
@@ -410,23 +396,12 @@ class Script:
         has_initial_state: bool = False,
         ad_mode: Optional[str] = None,
     ) -> _BatchPlan:
-        """Trace the circuit once and build the cacheable execution plan.
+        """Record scalar inputs and build a cached batched execution plan.
 
-        Records the tape from scalar slices of *args* (to derive
-        ``n_qubits``/noise), then builds the vmapped ``eqx.filter_jit``
-        wrapper.  When every positional argument is array-like (so plain
-        ``jax.jit`` — which has no static-argument handling — is valid) an
-        AOT-eligible plain ``jax.jit`` wrapper is built too; :meth:`_dispatch`
-        lowers and compiles it lazily per batch size, and only with concrete
-        args (the AOT path is gated off under a transform by the caller).
-
-        When *has_initial_state* is ``True`` the last entry of *args* is the
-        (vmapped) initial statevector rather than a circuit argument; it is
-        stripped before recording the tape and forwarded to
-        :func:`~jaqsi.simulation.simulate_and_measure`.  *ad_mode* (see
-        :func:`~jaqsi.simulation._ad_mode`) disables the adjoint VJP under
-        forward mode and sizes the batch tiles for the adjoint gradient under
-        reverse mode.
+        Concrete array inputs also get a plain ``jax.jit`` path. If an initial
+        state is present, the last argument is passed to the simulation kernel
+        rather than the circuit. *ad_mode* selects the differentiation path
+        and batch tile size.
         """
         scalar_args = tuple(
             self._slice_first(a, ax) if ax is not None else a
@@ -527,19 +502,10 @@ class Script:
         batch_size: int,
         chunk_size: int,
     ) -> jnp.ndarray:
-        """Run a built plan through the leanest applicable path.
+        """Run a plan in chunks, through a compiled function, or via ``batched_fn``.
 
-        - ``chunk_size < batch_size``: the full batch would not fit in memory,
-          so execute it in memory-safe sub-batches via
-          :func:`~jaqsi.memory.execute_chunked`.
-        - otherwise, when an AOT-eligible ``plain_fn`` exists, ahead-of-time
-          lower+compile the vmapped kernel to an XLA executable (cached per
-          ``aot_key``) and call it directly.  This skips both the per-call
-          pytree partition/combine of :func:`eqx.filter_jit` and its
-          just-in-time cache-key recomputation; for small circuits in a tight
-          loop that dispatch overhead, not the XLA compute, dominates.
-        - otherwise fall back to ``batched_fn`` (no ``plain_fn``: a non-array
-          argument, shot mode, or running under a transform).
+        Chunking limits memory. A plain JIT function is compiled and cached
+        when eligible; other calls use ``batched_fn``.
         """
         if chunk_size < batch_size:
             return memory.execute_chunked(
@@ -570,23 +536,10 @@ class Script:
         initial_state: Optional[jnp.ndarray] = None,
         fingerprint: Optional[Hashable] = None,
     ) -> jnp.ndarray:
-        """Vectorise :meth:`execute` over a batch axis using ``jax.vmap``.
+        """Vectorize execution over a batch axis with ``jax.vmap``.
 
-        The circuit function is traced once in Python with scalar slices to
-        record the tape, determine ``n_qubits``, and detect noise.  The
-        resulting pure simulation kernel is then mapped over the requested
-        axes by :func:`_vectorize`: split over all JAX devices and run in
-        cache-sized tiles on each.
-
-        Memory-aware chunking — before launching the full vmap, the
-        method estimates peak memory usage.  If the full batch would exceed
-        available RAM (with a safety margin), the batch is automatically
-        split into sub-batches that fit.  Each chunk is vmapped independently
-        and the results are concatenated.  This trades a small amount of
-        wall-clock time for guaranteed execution without OOM.
-
-        When the full batch fits in memory, there is zero overhead — the
-        memory check is a pure Python arithmetic calculation (no JAX calls).
+        Record the circuit once from scalar inputs, then run in cache-sized
+        tiles. Batches exceeding available memory are split into chunks.
 
         Args:
             type: Measurement type (see :meth:`execute`).

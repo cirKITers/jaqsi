@@ -9,28 +9,27 @@ title: Home
 <h3 align="center">Just another quantum simulator.</h3>
 <br/>
 
-JAQSI is a gate- and pulse-level quantum circuit simulator built on JAX.
-Circuits are plain Python functions that record operations onto a tape; the `Script` class compiles and executes them, routing between statevector and density-matrix simulation automatically depending on whether noise channels are present.
-Everything is pure JAX, so circuits are differentiable, `jit`-able and `vmap`-able out of the box.
+JAQSI is a JAX-based quantum circuit simulator for gates and pulses.
+Circuits are Python functions that record operations; `Script` executes them with statevector or density-matrix simulation, depending on whether they contain noise.
+Circuits support JAX differentiation, `jit`, and `vmap`.
 
-Curious? :eyes: Installing this package is as simple as with any other package :rocket:
+To give it a try, install JAQSI with pip:
 
 ```
 pip install jaqsi
 ```
 
-For NVIDIA GPUs install the CUDA extra:
+For NVIDIA GPUs, install the appropriate CUDA extra:
 
 ```
-pip install "jaqsi[cuda13]" # or cuda12 depending on your hardware
+pip install "jaqsi[cuda13]" # use cuda12 if needed
 ```
 
-JAX then runs on the GPU by default; set `JAX_PLATFORMS=cpu` to force the CPU.
-
-Once you have set things up, go ahead and check out [how to use JAQSI](usage.md).
+Once installed, define a circuit as a Python function. `Gates` records its operations, and `Script` executes it and returns the requested measurement. Here is a small one to start with; the [usage guide](usage.md) takes it further.
 
 ```python
 import jaqsi
+import jax.numpy as jnp
 from jaqsi import Gates
 
 def circuit(theta):
@@ -38,17 +37,16 @@ def circuit(theta):
     Gates.CX(wires=[0, 1])
 
 script = jaqsi.Script(circuit, n_qubits=2)
+theta = jnp.array([0.5])
 script.execute(type="expval", obs=[jaqsi.PauliZ(wires=0)], args=(theta,))
 ```
 
-`Gates` is the entry point for applying gates: it records them on the circuit tape, attaches
-any noise you ask for, and runs them as ideal unitaries or, with `pulse=True`, as real pulses.
+`Gates` records gates and optional noise on the circuit tape. By default, gates run as ideal unitaries; passing `pulse=True` runs their pulse implementations. The same circuit can use both levels.
 
-Beyond gate-level simulation, JAQSI can simulate circuits at the [pulse level](pulses.md) and tune pulse parameters with [quantum optimal control](references.md#quantum_optimal_control).
+To go below the gate level, simulate [pulses](pulses.md) and tune their parameters with [quantum optimal control](references.md#quantum_optimal_control).
 
-If you are looking for quantum Fourier model tooling built on top of this simulator (ansaetze, expressibility, entangling capability and Fourier analysis), see [qml-essentials](https://github.com/cirKITers/qml-essentials).
+For tools built on top of JAQSI, including quantum Fourier model ansätze, expressibility, entangling capability, and Fourier analysis, see [qml-essentials](https://github.com/cirKITers/qml-essentials).
 
-If you want to contribute, please refer to our [CONTRIBUTING guide](https://github.com/cirKITers/jaqsi/blob/main/CONTRIBUTING.md) on GitHub.
+Ideas and bug reports are welcome too; see the [contribution guide](https://github.com/cirKITers/jaqsi/blob/main/CONTRIBUTING.md).
 
-Do you want to use our software in a research project? :books:
-Please check out the [GitHub repository](https://github.com/cirKITers/jaqsi) and follow the instructions ("Cite this repository") there.
+For research citations, use "Cite this repository" on [GitHub](https://github.com/cirKITers/jaqsi).

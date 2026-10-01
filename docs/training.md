@@ -1,15 +1,10 @@
 # Training
 
-Everything in JAQSI is built on JAX, so a circuit executed through a `Script` is an
-ordinary differentiable function.
-That means training needs no special machinery: take a gradient with `jax.grad` (or
-`jax.value_and_grad`), hand it to an optimizer such as [Optax](https://optax.readthedocs.io/),
-and wrap the update in `jax.jit`.
+Good news: a circuit executed through `Script` is a differentiable JAX function, so training follows the usual JAX workflow. Define a scalar cost, take its gradient with `jax.grad` or `jax.value_and_grad`, and pass the result to an optimizer such as [Optax](https://optax.readthedocs.io/). `jax.jit` can compile the update step for repeated calls.
 
 ## A minimal training loop
 
-Define a circuit, wrap it in a `Script`, and turn an expectation value into a scalar cost.
-Here we simply drive $\langle Z_0 \rangle$ towards $-1$:
+Let's start small: define a circuit, wrap it in a `Script`, and turn an expectation value into a scalar cost. Here training drives $\langle Z_0 \rangle$ toward $-1$:
 
 ```python
 import jax
@@ -38,9 +33,7 @@ def cost(params):
     return script.execute(type="expval", obs=obs, args=(params,))[0]
 ```
 
-The optimization itself is plain Optax.
-Note that the whole step is `jit`-compiled: the circuit is traced once and the compiled
-program is reused for every epoch.
+Optax applies the parameter updates. The whole step is JIT-compiled, so JAX traces the circuit once for these input shapes and reuses the compiled program across epochs.
 
 ```python
 params = jnp.array([0.1, 0.2])
@@ -64,11 +57,7 @@ for epoch in range(1, 101):
 
 ## Fitting data
 
-To fit a function you need the circuit evaluated at many inputs.
-Rather than looping, pass the whole batch and tell `execute` which arguments carry a
-batch dimension via `in_axes` — the same convention as `jax.vmap`.
-Here the input `x` is batched (axis `0`) while the trainable weights are shared
-(`None`), and `Script` vectorizes the execution for you:
+For more than one input, pass a batch to `execute` and use `in_axes` to say which arguments carry a batch dimension, following the same convention as `jax.vmap`. Here `x` uses axis `0`, while the trainable weights use `None` and are shared across all samples:
 
 ```python
 def model_circuit(x, weights):
@@ -94,31 +83,19 @@ def mse(weights):
     return jnp.mean((predict(weights) - ys) ** 2)
 ```
 
-`mse` is then optimized with exactly the same `step` function as above.
-For large batches `Script` also chunks the `vmap` automatically so that the peak memory
-stays within what is available (see `memory.py`).
-On CPU, it further runs the batch in tiles whose working set fits in the cache (`memory.CACHE_BYTES`, read from the L3 size; set it by hand on virtual machines, which may report a per-core cache that is actually shared).
-The ODE solves of pulse-level gates are held to a smaller budget, `memory.SOLVE_CACHE_BYTES` (256 KiB), since XLA's multi-threading slows their many small operations down once a tile is large.
+Optimize `mse` with the same Optax pattern, using `mse` as the loss instead of `cost`.
 
-XLA's multi-threading barely speeds up a single circuit, but the samples of a batch are independent.
-To run them in parallel on CPU, expose the cores as JAX devices before JAX initialises:
+For large batches, `Script` automatically splits the `vmap` into chunks when the estimated peak memory would exceed what is available. On CPU, it further uses cache-sized tiles so repeated gate operations can reuse data already in cache. Pulse ODE solves have a separate, smaller tile budget. These estimates and limits are defined in `memory.py`.
 
-```python
-jax.config.update("jax_num_cpu_devices", 8)  # before the first JAX computation
-```
-
-`Script` then splits every batch whose size is a multiple of the device count over all devices, once the batch holds at least `memory.SHARD_MIN_SIZE` amplitudes in total (batch size times `2**n`, `2**13` by default; below that the dispatch costs more than it saves).
-Other batches run on one device.
-Gradients through pulse-level gates also stay on one device, since diffrax's ODE loop cannot be reverse-differentiated inside `jax.shard_map` yet.
+Samples in a batch are independent, so `Script` can also distribute a batch across configured CPU devices. The batch must divide evenly across devices and pass the `memory.SHARD_MIN_SIZE` threshold, measured in state amplitudes; below that threshold, dispatch overhead can outweigh the gain. Other batches run on one device. Pulse-level gradients also run on one device because diffrax's ODE loop cannot be reverse-differentiated inside `jax.shard_map`.
 
 ## How gradients are computed
 
 For expectation values of noise-free circuits, `Script` differentiates with the adjoint method instead of letting JAX tape every intermediate state.
-Here, the backward pass walks the circuit in reverse and undoes each gate with its inverse, so the memory a gradient needs stays at a few statevectors no matter how deep the circuit is.
-The result is identical to plain autodiff.
+The backward pass walks the circuit in reverse and reconstructs intermediate states by inverting each gate. It needs only a few statevectors regardless of circuit depth, while producing the same gradient as standard autodiff for supported circuits.
 The method needs unitary gates and expectation values, so `Script` falls back to standard reverse-mode autodiff for noisy circuits, shot-based, state or probability outputs, and gates that are not unitary.
 Forward-mode differentiation (`jax.jvp`, `jax.jacfwd`) falls back as well.
-This is detected on the arguments of `execute`, so it keep any `jax.jit` outside the forward-mode transform.
+This is detected from the arguments to `execute`, so keep any `jax.jit` outside the forward-mode transform.
 
 ## Training pulse parameters
 
@@ -166,19 +143,17 @@ pulse_params = PulseInformation.gate_by_name("RX").params * 1.15
 opt = optax.adam(0.01)
 opt_state = opt.init(pulse_params)
 
-for _ in range(30):
+for _ in range(200):
     loss, grads = jax.value_and_grad(infidelity)(pulse_params)
     updates, opt_state = opt.update(grads, opt_state, pulse_params)
     pulse_params = optax.apply_updates(pulse_params, updates)
-# infidelity 6.3e-02 -> ~1e-04
+# infidelity 6.3e-02 -> ~1e-10
 ```
 
-This hand-rolled loop is only meant to show the mechanism.
-For real calibration use the `QOC` class, which wraps the same idea with a multi-objective
+That is the basic idea: gradients flow through the pulse ODE solver too. For full gate calibration, use `QOC`, which adds a multi-objective
 cost (fidelity and phase, plus optional pulse-width and evolution-time penalties), a
 parameter scan to pick the starting point, learning-rate scheduling and gradient clipping.
-The parameters shipped in `qoc_results_<envelope>.csv` were produced that way; evaluating
-`infidelity` at those defaults gives a residual on the order of machine precision.
+The shipped `qoc_results_<envelope>.csv` parameters were produced with that optimization process.
 
 ```python
 from jaqsi.qoc import QOC, default_qoc_params

@@ -237,6 +237,21 @@ class TestSpectralDensityCostFn:
             f"narrow Gaussian cost ({narrow_cost})"
         )
 
+    def test_drag_quadrature_widens_the_spectrum(self):
+        """The DRAG quadrature adds its power to the in-phase envelope's."""
+        # DRAG: [A, beta, sigma, t_evol]
+        without = spectral_density_cost_fn(
+            jnp.array([1.0, 0.0, 0.3, 2.0]), envelope="drag"
+        )
+        gauss = spectral_density_cost_fn(
+            jnp.array([1.0, 0.3, 2.0]), envelope="gaussian"
+        )
+        with_quad = spectral_density_cost_fn(
+            jnp.array([1.0, 0.5, 0.3, 2.0]), envelope="drag"
+        )
+        assert jnp.isclose(without, gauss)
+        assert with_quad > without
+
     def test_is_differentiable(self):
         """JAX can compute gradients through the spectral density cost."""
         grad_fn = jax.grad(lambda p: spectral_density_cost_fn(p, envelope="gaussian"))
@@ -253,6 +268,10 @@ class TestQOCInit:
         qoc = QOC(**qoc_test_params())
         names = [name for name, _ in qoc.cost_fns]
         assert "unitary" in names
+
+    def test_default_envelope(self):
+        """QOC calibrates the default envelope of the pulse gates."""
+        assert default_qoc_params["envelope"] == PulseInformation.DEFAULT_ENVELOPE
 
     def test_custom_cost_fns(self):
         """Custom cost_fns override the defaults."""

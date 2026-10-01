@@ -309,19 +309,47 @@ class PulseEnvelope:
     Each envelope is a pure function ``(p, t, t_c) -> amplitude`` that
     computes the pulse envelope *without* carrier modulation.  The carrier
     ``cos(omega_c * t + phi_c)`` is applied separately in the coefficient
-    functions built by :meth:`build_coeff_fns`.
+    functions built by :meth:`build_coeff_fns`.  Two-quadrature envelopes
+    (DRAG) additionally drive the orthogonal carrier
+    ``cos(omega_c * t + phi_c + pi/2)`` with a quadrature envelope of the
+    same signature.
 
     Attributes:
         REGISTRY: Mapping from envelope name to metadata dict containing
             ``fn`` (callable), ``n_envelope_params`` (int), and per-gate
-            default parameter arrays.
+            default parameter arrays.  Two-quadrature envelopes also
+            register their quadrature envelope as ``quadrature_fn``.
     """
 
     @staticmethod
     def gaussian(p, t, t_c):
-        """Gaussian envelope. ``p = [A, sigma]``."""
+        """Lifted Gaussian envelope. ``p = [A, sigma]``.
+
+        ``A (g(t) - g(0)) / (1 - g(0))`` with ``g(t) = exp(-(t - t_c)^2 /
+        (2 sigma^2))`` peaks at ``A`` in ``t_c`` and vanishes at the pulse
+        edges ``t = 0`` and ``t = 2 t_c``.  This is the continuous-time form of
+        Qiskit's lifted ``Gaussian``, see
+        https://quantum.cloud.ibm.com/docs/api/qiskit/1.4/qiskit.pulse.library.Gaussian
+        """
         A, sigma = p[0], p[1]
-        return A * jnp.exp(-0.5 * ((t - t_c) / sigma) ** 2)
+        return A * PulseEnvelope._lifted_gaussian(sigma, t, t_c)
+
+    @staticmethod
+    def _lifted_gaussian(sigma, t, t_c):
+        """Unit-peak lifted Gaussian ``(g(t) - g(0)) / (1 - g(0))``.
+
+        With ``a = log g(t)``, ``b = log g(0)`` and ``d = a - b = t (2 t_c - t)
+        / (2 sigma^2)``, the numerator is evaluated as ``exp(max(a, b)) *
+        (expm1(min(d, 0)) - expm1(min(-d, 0)))``.  This avoids the cancellation
+        of the plain form for ``sigma >> t_c``, where the shape tends to the
+        parabola ``t (2 t_c - t) / t_c^2``, and stays finite outside the pulse,
+        where adaptive solvers may probe their initial step.
+        """
+        a = -0.5 * ((t - t_c) / sigma) ** 2
+        b = -0.5 * (t_c / sigma) ** 2
+        d = t * (2 * t_c - t) / (2 * sigma**2)
+        rise = jnp.expm1(jnp.minimum(d, 0.0)) - jnp.expm1(jnp.minimum(-d, 0.0))
+        return jnp.exp(jnp.maximum(a, b)) * rise / -jnp.expm1(b)
 
     @staticmethod
     def square(p, t, t_c):
@@ -338,17 +366,58 @@ class PulseEnvelope:
 
     @staticmethod
     def drag(p, t, t_c):
-        """DRAG (Derivative Removal by Adiabatic Gate). ``p = [A, beta, sigma]``."""
+        """DRAG (Derivative Removal by Adiabatic Gate) in-phase envelope.
+
+        The lifted Gaussian of :meth:`gaussian`, ``p = [A, beta, sigma]``;
+        ``beta`` only enters the quadrature envelope :meth:`drag_quadrature`.
+        """
+        A, sigma = p[0], p[2]
+        return A * PulseEnvelope._lifted_gaussian(sigma, t, t_c)
+
+    @staticmethod
+    def drag_quadrature(p, t, t_c):
+        """DRAG quadrature envelope ``-beta * dE/dt`` of ``E = drag(p, t, t_c)``.
+
+        First-order DRAG of Motzoi et al., PRL 103, 110501 (2009), Eq. (9),
+        with ``beta`` in place of ``1/Delta``.  At the fixed pulse centre
+        ``t_c``, ``dE/dt = -A (t - t_c) / sigma**2 * g(t) / (1 - g(0))``,
+        which is odd around ``t_c`` and, unlike ``E``, does not vanish at the
+        pulse edges.
+        """
         A, beta, sigma = p[0], p[1], p[2]
-        g = A * jnp.exp(-0.5 * ((t - t_c) / sigma) ** 2)
-        dg = g * (-(t - t_c) / sigma**2)
-        return g + beta * dg
+        g = jnp.exp(-0.5 * ((t - t_c) / sigma) ** 2)
+        lift = -jnp.expm1(-0.5 * (t_c / sigma) ** 2)  # 1 - g(0)
+        return A * beta * (t - t_c) / sigma**2 * g / lift
+
+    @staticmethod
+    def _no_quadrature(p, t, t_c):
+        """Quadrature envelope of the single-quadrature envelopes."""
+        return jnp.zeros_like(t)
 
     @staticmethod
     def sech(p, t, t_c):
         """Hyperbolic secant envelope. ``p = [A, sigma]``."""
         A, sigma = p[0], p[1]
         return A / jnp.cosh((t - t_c) / sigma)
+
+    @staticmethod
+    def drag_legacy(p, t, t_c):
+        """Pulse model of ``drag`` up to jaqsi 2a9132f. ``p = [A, beta, sigma]``.
+
+        Reproduces results obtained with those versions, e.g. earlier
+        pulse-level studies, with their calibrated defaults (not recalibrated).
+        The envelope ``g + beta * dg``, with ``g = A exp(-(t - t_c')^2 /
+        (2 sigma^2))`` and ``dg = -(t - t_c') / sigma**2 * g``, drives a single
+        quadrature, so this is not DRAG in the sense of Motzoi et al.  The
+        centre is the running ``t_c' = t / 2`` of those versions: the ``t_c``
+        argument is ignored and, for ``beta >= 0``, the envelope decays from
+        ``A`` at ``t = 0`` instead of peaking at the pulse midpoint.
+        """
+        A, beta, sigma = p[0], p[1], p[2]
+        t_c = t / 2
+        g = A * jnp.exp(-0.5 * ((t - t_c) / sigma) ** 2)
+        dg = g * (-(t - t_c) / sigma**2)
+        return g + beta * dg
 
     # ``n_envelope_params`` counts only the envelope parameters (excluding
     # the evolution time ``t`` which is always the last element of the full
@@ -359,10 +428,10 @@ class PulseEnvelope:
             "n_envelope_params": 2,
             "defaults": {
                 "RX": jnp.array(
-                    [0.38009941846766804, 1.631698142660167, 3.007403822238108]
+                    [0.44506904345408577, 1.9072729604580203, 3.5213966860043175]
                 ),
                 "RY": jnp.array(
-                    [0.3836652338514791, 1.616595983505249, 2.9794135093698966]
+                    [0.449245182920846, 1.8896592598281816, 3.4886409030956145]
                 ),
             },
         },
@@ -371,10 +440,10 @@ class PulseEnvelope:
             "n_envelope_params": 2,
             "defaults": {
                 "RX": jnp.array(
-                    [1.209655637514602, 0.8266815576721239, 1.1483122857413859]
+                    [1.209660477974627, 0.8266782440135297, 1.1483171598013935]
                 ),
                 "RY": jnp.array(
-                    [1.0287942142779052, 0.9860505130182093, 0.9720116870310977]
+                    [1.0260908021252053, 1.000371727035551, 0.9745726190714447]
                 ),
             },
         },
@@ -382,12 +451,51 @@ class PulseEnvelope:
             "fn": cosine.__func__,
             "n_envelope_params": 2,
             "defaults": {
-                "RX": jnp.array([1.0, 1.0, 1.0]),
-                "RY": jnp.array([1.0, 1.0, 1.0]),
+                "RX": jnp.array(
+                    [1.4970963752879989, 1.1647261280710832, 0.8317222416617329]
+                ),
+                "RY": jnp.array(
+                    [1.4970963752879989, 1.1647261280710832, 0.8317222416617329]
+                ),
             },
         },
         "drag": {
             "fn": drag.__func__,
+            "quadrature_fn": drag_quadrature.__func__,
+            "n_envelope_params": 3,
+            "defaults": {
+                "RX": jnp.array(
+                    [
+                        0.4462644494309652,
+                        5.56779671979968e-19,
+                        1.890265883325973,
+                        3.5141632250053174,
+                    ]
+                ),
+                "RY": jnp.array(
+                    [
+                        0.45045111802374943,
+                        1.2007294980651857e-13,
+                        1.872843283708579,
+                        3.481473844222316,
+                    ]
+                ),
+            },
+        },
+        "sech": {
+            "fn": sech.__func__,
+            "n_envelope_params": 2,
+            "defaults": {
+                "RX": jnp.array(
+                    [1.18559023969428, 1.5022530879336038, 0.8547640992860961]
+                ),
+                "RY": jnp.array(
+                    [1.18559023969428, 1.5022530879336038, 0.8547640992860961]
+                ),
+            },
+        },
+        "drag_legacy": {
+            "fn": drag_legacy.__func__,
             "n_envelope_params": 3,
             "defaults": {
                 "RX": jnp.array(
@@ -406,14 +514,6 @@ class PulseEnvelope:
                         3.139481229843545,
                     ]
                 ),
-            },
-        },
-        "sech": {
-            "fn": sech.__func__,
-            "n_envelope_params": 2,
-            "defaults": {
-                "RX": jnp.array([1.0, 1.0, 1.0]),
-                "RY": jnp.array([1.0, 1.0, 1.0]),
             },
         },
         "general": {
@@ -452,15 +552,19 @@ class PulseEnvelope:
         omega_q: float,
         rwa: bool = True,
         frame: str = "drive",
+        quadrature_fn: Optional[Callable] = None,
     ) -> Tuple[Callable, Callable, Callable, Callable]:
         """Build the four interaction-picture coefficient functions.
 
         The lab-frame Hamiltonian is
 
             H(t,Π) = H_static + Σ_j S_j(t;Π) H_j ,
-            S_j(t;Π) = E_j(t;Π) · cos(ω_c·t + φ_c) ,
+            S_j(t;Π) = E_j(t;Π) · cos(ω_c·t + φ_c)
+                       − Q_j(t;Π) · sin(ω_c·t + φ_c) ,
 
-        and the interaction-picture transform with respect to
+        where the quadrature envelope ``Q`` drives the orthogonal carrier
+        ``cos(ω_c·t + φ_c + π/2)`` and vanishes for single-quadrature
+        envelopes.  The interaction-picture transform with respect to
         ``H_static = (ω_q/2)·Z`` produces
 
             H̃_j(t) = exp(+i H_static t) H_j exp(-i H_static t) ,
@@ -469,18 +573,18 @@ class PulseEnvelope:
         For a single qubit driven on X, ``H̃_X(t) = cos(ω_q·t) X
         − sin(ω_q·t) Y``, so
 
-            H_I(t) = Ω(t) · cos(ω_c·t + φ) ·
-                     [ cos(ω_q·t) · X  −  sin(ω_q·t) · Y ] .
+            H_I(t) = S(t) · [ cos(ω_q·t) · X  −  sin(ω_q·t) · Y ] .
 
         ``rwa=True`` (default) drops the fast (~2·ω_q on resonance) terms and
         keeps only the slow envelope, yielding the analytical RWA
 
-            H_I^RWA(t) = (Ω(t)/2) · [ cos(φ) X + sin(φ) Y ] .
+            H_I^RWA(t) = (E(t)/2) · [ cos(φ) X + sin(φ) Y ]
+                       + (Q(t)/2) · [ −sin(φ) X + cos(φ) Y ] .
 
-        For RX (``φ = 0``) this reduces to ``(Ω/2)·X``; for RY
-        (``φ = +π/2``) to ``(Ω/2)·Y``.  This is dramatically cheaper to
-        integrate (no fast oscillations → adaptive ODE solver takes
-        large steps).
+        For RX (``φ = 0``) this reduces to ``(E/2)·X + (Q/2)·Y``; for RY
+        (``φ = +π/2``) to ``(E/2)·Y − (Q/2)·X``.  This is dramatically
+        cheaper to integrate (no fast oscillations → adaptive ODE solver
+        takes large steps).
 
         ``rwa=False``  keeps **both** the slow and the fast
         counter-rotating components.
@@ -489,9 +593,11 @@ class PulseEnvelope:
         jaqsi solver cache assigns separate compiled XLA programs per
         envelope shape and per (gate, component) pair.
 
-        The rotation angle ``w`` is expected as the **last** element of
-        the parameter array ``p`` (i.e. ``p[-1]``).  Envelope parameters
-        occupy ``p[:-1]``.
+        The parameter array is ``p = [envelope params..., T, w]``: the
+        rotation angle ``w`` is its last element and the pulse duration
+        ``T`` the one before.  Every envelope is centred at the pulse
+        midpoint ``t_c = T / 2`` of the integration window ``[0, T]``
+        (except :meth:`drag_legacy`, which ignores ``t_c``).
 
         Args:
             envelope_fn: Pure envelope function ``(p, t, t_c) -> scalar``.
@@ -515,12 +621,15 @@ class PulseEnvelope:
                   frequency alone (``Δ = |ω_c-ω_q|``) when the fast
                   ``(ω_c+ω_q)`` mode is well-resolved by the chosen
                   step.
-                * ``"drive"``: the literal form
+                * ``"lab"``: the literal form
                   ``Ω(t) cos(ω_c t + φ) cos(ω_q t)`` (and the analogous
                   ``-sin`` term).  Two trig multiplications per call;
                   contains all four product frequencies implicitly.
 
                 Ignored when ``rwa=True``.
+            quadrature_fn: Quadrature envelope ``(p, t, t_c) -> scalar`` of
+                a two-quadrature envelope (DRAG).  ``None`` (default) for
+                single-quadrature envelopes.
 
         Returns:
             Tuple ``(coeff_RX_X, coeff_RX_Y, coeff_RY_X, coeff_RY_Y)``
@@ -529,36 +638,32 @@ class PulseEnvelope:
         """
         if frame not in ("lab", "drive"):
             raise ValueError(f"Unknown frame {frame!r}; expected 'lab' or 'drive'.")
+        if quadrature_fn is None:
+            quadrature_fn = PulseEnvelope._no_quadrature
         if rwa:
             # RWA-truncated coefficients (no carrier, no fast factors).
-            # H_I^RWA = (Ω(t)/2) [cos(φ) X + sin(φ) Y]; we keep the
-            # ``p[-1]`` rotation-angle scaling so the calling
+            # H_I^RWA = (E/2) [cos(φ) X + sin(φ) Y] + (Q/2) [−sin(φ) X + cos(φ) Y];
+            # we keep the ``p[-1]`` rotation-angle scaling so the calling
             # ParametrizedHamiltonian shape is unchanged.
-            #
-            # Note the envelope center convention: ``t_c = t / 2`` uses the
-            # running integration variable ``t``, so ``envelope_fn`` evaluates
-            # to a monotone decay over ``[0, t_final]`` rather than a bump
-            # centered at the pulse midpoint. The calibrated defaults are fit
-            # around this exact form.
             half = jnp.asarray(0.5)
 
             def _coeff_RX_X(p, t):
-                t_c = t / 2
+                t_c = p[-2] / 2
                 env = envelope_fn(p, t, t_c)
                 return half * env * p[-1]
 
-            def _coeff_RX_Y(p, t):  # Y component vanishes for RX (φ=0)
-                t_c = t / 2
-                env = envelope_fn(p, t, t_c)
-                return jnp.zeros_like(half * env * p[-1])
+            def _coeff_RX_Y(p, t):  # quadrature only for RX (φ=0)
+                t_c = p[-2] / 2
+                quad = quadrature_fn(p, t, t_c)
+                return half * quad * p[-1]
 
-            def _coeff_RY_X(p, t):  # X component vanishes for RY (φ=π/2)
-                t_c = t / 2
-                env = envelope_fn(p, t, t_c)
-                return jnp.zeros_like(half * env * p[-1])
+            def _coeff_RY_X(p, t):  # quadrature only for RY (φ=π/2)
+                t_c = p[-2] / 2
+                quad = quadrature_fn(p, t, t_c)
+                return -half * quad * p[-1]
 
             def _coeff_RY_Y(p, t):
-                t_c = t / 2
+                t_c = p[-2] / 2
                 env = envelope_fn(p, t, t_c)
                 return half * env * p[-1]
 
@@ -573,36 +678,45 @@ class PulseEnvelope:
             # Identities used:
             #   cos(ω_c t) cos(ω_q t) = ½[cos(Δ t) + cos(Σ t)]
             #   cos(ω_c t) sin(ω_q t) = ½[sin(Σ t) − sin(Δ t)]
-            #   −sin(ω_c t) cos(ω_q t) = −½[sin(Σ t) + sin(Δ t)]
-            #   −sin(ω_c t) sin(ω_q t) = ½[cos(Σ t) − cos(Δ t)]
-            # (RY uses cos(ω_c t + π/2) = −sin(ω_c t).)
+            #   sin(ω_c t) cos(ω_q t) = ½[sin(Σ t) + sin(Δ t)]
+            #   sin(ω_c t) sin(ω_q t) = ½[cos(Δ t) − cos(Σ t)]
+            # (RY uses cos(ω_c t + π/2) = −sin(ω_c t) and
+            # sin(ω_c t + π/2) = cos(ω_c t).)
             omega_d = omega_c - omega_q
             omega_s = omega_c + omega_q
             half = jnp.asarray(0.5)
 
             def _coeff_RX_X(p, t):
-                t_c = t / 2
+                t_c = p[-2] / 2
                 env = envelope_fn(p, t, t_c)
+                quad = quadrature_fn(p, t, t_c)
                 mod = half * (jnp.cos(omega_d * t) + jnp.cos(omega_s * t))
-                return env * mod * p[-1]
+                quad_mod = -half * (jnp.sin(omega_s * t) + jnp.sin(omega_d * t))
+                return (env * mod + quad * quad_mod) * p[-1]
 
             def _coeff_RX_Y(p, t):
-                t_c = t / 2
+                t_c = p[-2] / 2
                 env = envelope_fn(p, t, t_c)
+                quad = quadrature_fn(p, t, t_c)
                 mod = -half * (jnp.sin(omega_s * t) - jnp.sin(omega_d * t))
-                return env * mod * p[-1]
+                quad_mod = half * (jnp.cos(omega_d * t) - jnp.cos(omega_s * t))
+                return (env * mod + quad * quad_mod) * p[-1]
 
             def _coeff_RY_X(p, t):
-                t_c = t / 2
+                t_c = p[-2] / 2
                 env = envelope_fn(p, t, t_c)
+                quad = quadrature_fn(p, t, t_c)
                 mod = -half * (jnp.sin(omega_s * t) + jnp.sin(omega_d * t))
-                return env * mod * p[-1]
+                quad_mod = -half * (jnp.cos(omega_d * t) + jnp.cos(omega_s * t))
+                return (env * mod + quad * quad_mod) * p[-1]
 
             def _coeff_RY_Y(p, t):
-                t_c = t / 2
+                t_c = p[-2] / 2
                 env = envelope_fn(p, t, t_c)
+                quad = quadrature_fn(p, t, t_c)
                 mod = -half * (jnp.cos(omega_s * t) - jnp.cos(omega_d * t))
-                return env * mod * p[-1]
+                quad_mod = half * (jnp.sin(omega_s * t) - jnp.sin(omega_d * t))
+                return (env * mod + quad * quad_mod) * p[-1]
 
             return _coeff_RX_X, _coeff_RX_Y, _coeff_RY_X, _coeff_RY_Y
 
@@ -610,31 +724,41 @@ class PulseEnvelope:
         #   cos(ω_q τ)·cos(ω_q τ)  averages to +1/2  → drives +X
         #   -cos(ω_q τ)·sin(ω_q τ) averages to  0    → Y cancels
         # giving H_I^RWA ≈ (Ω/2)·X → U ≈ exp(-iθ/2 X), matching op.RX.
+        # The quadrature carrier −sin(ω_c τ) drives +Y in the same way.
         # The exact form below KEEPS the fast 2·ω_q components.
         def _coeff_RX_X(p, t):
-            t_c = t / 2
+            t_c = p[-2] / 2
             env = envelope_fn(p, t, t_c)
-            carrier = jnp.cos(omega_c * t)
-            return env * carrier * jnp.cos(omega_q * t) * p[-1]
+            quad = quadrature_fn(p, t, t_c)
+            drive = env * jnp.cos(omega_c * t) - quad * jnp.sin(omega_c * t)
+            return drive * jnp.cos(omega_q * t) * p[-1]
 
         def _coeff_RX_Y(p, t):
-            t_c = t / 2
+            t_c = p[-2] / 2
             env = envelope_fn(p, t, t_c)
-            carrier = jnp.cos(omega_c * t)
-            return -env * carrier * jnp.sin(omega_q * t) * p[-1]
+            quad = quadrature_fn(p, t, t_c)
+            drive = env * jnp.cos(omega_c * t) - quad * jnp.sin(omega_c * t)
+            return -drive * jnp.sin(omega_q * t) * p[-1]
 
-        # RY uses carrier phase phi = +pi/2 so the RWA component drives +Y.
+        # RY uses carrier phase phi = +pi/2 so the RWA component drives +Y
+        # and the quadrature −X.
         def _coeff_RY_X(p, t):
-            t_c = t / 2
+            t_c = p[-2] / 2
             env = envelope_fn(p, t, t_c)
-            carrier = jnp.cos(omega_c * t + jnp.pi / 2)
-            return env * carrier * jnp.cos(omega_q * t) * p[-1]
+            quad = quadrature_fn(p, t, t_c)
+            drive = env * jnp.cos(omega_c * t + jnp.pi / 2) - quad * jnp.sin(
+                omega_c * t + jnp.pi / 2
+            )
+            return drive * jnp.cos(omega_q * t) * p[-1]
 
         def _coeff_RY_Y(p, t):
-            t_c = t / 2
+            t_c = p[-2] / 2
             env = envelope_fn(p, t, t_c)
-            carrier = jnp.cos(omega_c * t + jnp.pi / 2)
-            return -env * carrier * jnp.sin(omega_q * t) * p[-1]
+            quad = quadrature_fn(p, t, t_c)
+            drive = env * jnp.cos(omega_c * t + jnp.pi / 2) - quad * jnp.sin(
+                omega_c * t + jnp.pi / 2
+            )
+            return -drive * jnp.sin(omega_q * t) * p[-1]
 
         return _coeff_RX_X, _coeff_RX_Y, _coeff_RY_X, _coeff_RY_Y
 
@@ -647,7 +771,7 @@ class PulseInformation:
     and defaults match the selected envelope.
     """
 
-    DEFAULT_ENVELOPE: str = "drag"
+    DEFAULT_ENVELOPE: str = "gaussian"
     DEFAULT_RWA: bool = True
     DEFAULT_FRAME: str = "drive"
     LEAF_GATE_NAMES: Tuple[str, ...] = ("RX", "RY", "RZ", "CZ")
@@ -839,6 +963,7 @@ class PulseInformation:
             PulseGates.omega_q,
             rwa=cls._rwa,
             frame=cls._frame,
+            quadrature_fn=info.get("quadrature_fn"),
         )
         PulseGates._coeff_RX_X = staticmethod(rx_x)
         PulseGates._coeff_RX_Y = staticmethod(rx_y)
@@ -849,6 +974,7 @@ class PulseInformation:
         PulseGates._coeff_Sx = staticmethod(rx_x)
         PulseGates._coeff_Sy = staticmethod(ry_y)
         PulseGates._active_envelope = name
+        PulseGates._active_quadrature = "quadrature_fn" in info
         PulseGates._active_rwa = cls._rwa
         PulseGates._active_frame = cls._frame
 
@@ -1076,6 +1202,9 @@ class PulseGates:
     _H_corr = np.pi / 2 * np.eye(2, dtype=np.complex128)
 
     _active_envelope: str = "gaussian"
+    # Whether the active envelope drives a second quadrature (DRAG), whose
+    # off-axis term RX and RY then keep under the RWA as well.
+    _active_quadrature: bool = False
     # Mirrors :attr:`PulseInformation._rwa`; kept here for introspection
     # of which coefficient regime the active ``_coeff_*`` functions
     # implement.  Updated by :meth:`PulseInformation.set_envelope` /
@@ -1091,7 +1220,7 @@ class PulseGates:
     @staticmethod
     def _coeff_RX_X(p, t):
         """RX coefficient for the X term (gaussian default)."""
-        t_c = t / 2
+        t_c = p[-2] / 2
         env = PulseEnvelope.gaussian(p, t, t_c)
         carrier = jnp.cos(PulseGates.omega_c * t)
         return env * carrier * jnp.cos(PulseGates.omega_q * t) * p[-1]
@@ -1099,7 +1228,7 @@ class PulseGates:
     @staticmethod
     def _coeff_RX_Y(p, t):
         """RX coefficient for the Y term (gaussian default)."""
-        t_c = t / 2
+        t_c = p[-2] / 2
         env = PulseEnvelope.gaussian(p, t, t_c)
         carrier = jnp.cos(PulseGates.omega_c * t)
         return -env * carrier * jnp.sin(PulseGates.omega_q * t) * p[-1]
@@ -1107,7 +1236,7 @@ class PulseGates:
     @staticmethod
     def _coeff_RY_X(p, t):
         """RY coefficient for the X term (gaussian default)."""
-        t_c = t / 2
+        t_c = p[-2] / 2
         env = PulseEnvelope.gaussian(p, t, t_c)
         carrier = jnp.cos(PulseGates.omega_c * t + jnp.pi / 2)
         return env * carrier * jnp.cos(PulseGates.omega_q * t) * p[-1]
@@ -1115,7 +1244,7 @@ class PulseGates:
     @staticmethod
     def _coeff_RY_Y(p, t):
         """RY coefficient for the Y term (gaussian default)."""
-        t_c = t / 2
+        t_c = p[-2] / 2
         env = PulseEnvelope.gaussian(p, t, t_c)
         carrier = jnp.cos(PulseGates.omega_c * t + jnp.pi / 2)
         return -env * carrier * jnp.sin(PulseGates.omega_q * t) * p[-1]
@@ -1171,6 +1300,7 @@ class PulseGates:
                     duration=dur,
                     carrier_phase=meta["carrier_phase"],
                     parent=parent,
+                    quadrature_fn=info.get("quadrature_fn"),
                 )
             )
         else:
@@ -1260,18 +1390,19 @@ class PulseGates:
         #   H_I(τ) = Ω(τ)·cos(ω_c·τ) · [ cos(ω_q·τ)·X − sin(ω_q·τ)·Y ]
         # which on resonance averages (RWA) to +(Ω/2)·X while the
         # 2·ω_q counter-rotating part oscillates and cancels.
-        # Under the RWA the Y component vanishes; the X term alone is solved
-        # in closed form (see :meth:`Evolution._evolve_parametrized`).
+        # Under the RWA the Y component is the quadrature of a two-quadrature
+        # envelope (DRAG) and vanishes otherwise; the X term alone is then
+        # solved in closed form (see :meth:`Evolution._evolve_parametrized`).
         H_X = Hamiltonian(PulseGates.X, wires=wires)
         H_Y = Hamiltonian(PulseGates.Y, wires=wires)
         H_eff = PulseGates._coeff_RX_X * H_X
-        if not PulseGates._active_rwa:
+        if not PulseGates._active_rwa or PulseGates._active_quadrature:
             H_eff = H_eff + PulseGates._coeff_RX_Y * H_Y
 
-        # Pack: [envelope_params..., w] - evolution time is the last element
-        # of pulse_params (pulse_params[-1]).
+        # Pack: [envelope_params..., T, w] - the evolution time T is the
+        # last element of pulse_params and sets the envelope centre T / 2.
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        env_params = _pack_params(pulse_params, slice(None, -1), w)
+        env_params = _pack_params(pulse_params, slice(None), w)
         # All terms share the same parameter array.
         H_eff.evolve(name="RX")([env_params] * H_eff.n_terms, t)
         UnitaryGates.Noise(wires, noise_params)
@@ -1300,18 +1431,20 @@ class PulseGates:
         t = _duration(pulse_params)
 
         # See NOTE in RX: same proper interaction-picture form, with
-        # carrier phase ϕ = +π/2 so the slow RWA component drives +Y.
-        # Under the RWA the X component vanishes, as in RX.
+        # carrier phase ϕ = +π/2 so the slow RWA component drives +Y and
+        # the DRAG quadrature −X.  Under the RWA the X component vanishes
+        # for single-quadrature envelopes, as in RX.
         H_X = Hamiltonian(PulseGates.X, wires=wires)
         H_Y = Hamiltonian(PulseGates.Y, wires=wires)
         H_eff = PulseGates._coeff_RY_Y * H_Y
-        if not PulseGates._active_rwa:
+        if not PulseGates._active_rwa or PulseGates._active_quadrature:
             H_eff = PulseGates._coeff_RY_X * H_X + H_eff
 
-        # Pack w into the params so the coefficient function doesn't need
-        # a closure - this enables JIT solver cache sharing across all RY calls.
+        # Pack T and w into the params so the coefficient function doesn't
+        # need a closure - this enables JIT solver cache sharing across all
+        # RY calls.
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
-        env_params = _pack_params(pulse_params, slice(None, -1), w)
+        env_params = _pack_params(pulse_params, slice(None), w)
         H_eff.evolve(name="RY")([env_params] * H_eff.n_terms, t)
         UnitaryGates.Noise(wires, noise_params)
 

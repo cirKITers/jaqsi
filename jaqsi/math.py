@@ -7,16 +7,13 @@ from scipy.linalg import logm
 
 
 def logm_v(A: jnp.ndarray, **kwargs) -> jnp.ndarray:
-    """
-    Compute the logarithm of a matrix. If the provided matrix has an additional
-    batch dimension, the logarithm of each matrix is computed.
+    """Compute the logarithm of a matrix or a batch of matrices.
 
     Args:
-        A (jnp.ndarray): The (potentially batched) matrices of which to compute
-        the logarithm.
+        A: Matrix or batch of matrices.
 
     Returns:
-        jnp.ndarray: The log matrices
+        Matrix logarithm with the same shape as *A*.
     """
     # TODO: check warnings
     if len(A.shape) == 2:

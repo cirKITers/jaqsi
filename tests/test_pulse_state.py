@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jaqsi.pulses import PulseGates, PulseInformation
+from jaqsi.pulses import PulseEnvelope, PulseGates, PulseInformation
 from jaqsi import Evolution, Script
 
 
@@ -108,15 +108,15 @@ def test_set_envelope_evicts_stale_solver_cache():
         OpRX(w, wires=0)
 
     # Prime the cache under a different envelope.
-    PulseInformation.set_envelope("gaussian")
+    PulseInformation.set_envelope("drag")
     Script(pulse_circuit, n_qubits=1).execute(
         type="state", args=(jnp.pi / 4, PulseInformation.RX.params)
     )
     assert len(Evolution._evolve_solver_cache) >= 1
 
     # Switch back to the default envelope.  Stale entries that referenced
-    # the gaussian coefficient functions must be evicted so they cannot
-    # be returned for the new (drag) coefficient functions.
+    # the drag coefficient functions must be evicted so they cannot
+    # be returned for the new (gaussian) coefficient functions.
     PulseInformation.set_envelope(PulseInformation.DEFAULT_ENVELOPE)
     assert len(Evolution._evolve_solver_cache) == 0
 
@@ -214,8 +214,9 @@ def test_identical_pulse_gates_are_solved_once():
 def test_single_term_drive_is_solved_in_closed_form():
     """A drive f(t) H commutes with itself, so U = exp(-i F H), F = int f dt.
 
-    For the RWA gaussian RY, F = w A sigma sqrt(2 pi) erf(T / (2 sqrt(2) sigma)) / 2
-    (envelope centre ``t / 2``).  The angle is far beyond pi, where the matrix
+    For the RWA gaussian RY, lifted by its edge value g0 = exp(-T^2 / (8 sigma^2)),
+    F = w A (sigma sqrt(2 pi) erf(T / (2 sqrt(2) sigma)) - T g0) / (2 (1 - g0))
+    (envelope centre ``T / 2``).  The angle is far beyond pi, where the matrix
     ODE needs hundreds of steps.
     """
     from jax.scipy.special import erf
@@ -225,9 +226,11 @@ def test_single_term_drive_is_solved_in_closed_form():
     A, sigma, T = PulseInformation.RY.params
     w = 60.0
     H = PulseGates._coeff_RY_Y * Hermitian(PulseGates.Y, wires=0, record=False)
-    U = H.evolve()([jnp.array([A, sigma, w])], T).matrix
+    U = H.evolve()([jnp.array([A, sigma, T, w])], T).matrix
 
-    F = w * A * sigma * jnp.sqrt(2 * jnp.pi) * erf(T / (2 * jnp.sqrt(2) * sigma)) / 2
+    g0 = jnp.exp(-(T**2) / (8 * sigma**2))
+    area = sigma * jnp.sqrt(2 * jnp.pi) * erf(T / (2 * jnp.sqrt(2) * sigma)) - T * g0
+    F = w * A * area / (2 * (1 - g0))
     expected = jnp.cos(F) * jnp.eye(2) - 1j * jnp.sin(F) * PulseGates.Y
     assert jnp.allclose(U, expected, atol=1e-8)
 
@@ -243,7 +246,7 @@ def test_closed_form_can_be_switched_off():
     PulseInformation.set_envelope("gaussian", rwa=True)
     A, sigma, T = PulseInformation.RY.params
     H = PulseGates._coeff_RY_Y * Hermitian(PulseGates.Y, wires=0, record=False)
-    params = [jnp.array([A, sigma, 2.0])]
+    params = [jnp.array([A, sigma, T, 2.0])]
 
     closed = H.evolve()(params, T)
     ode = H.evolve(closed_form=False)(params, T)
@@ -259,7 +262,10 @@ def test_closed_form_can_be_switched_off():
 
 
 def test_rwa_rotations_are_single_term():
-    """Under the RWA the off-axis component of RX and RY vanishes and is dropped."""
+    """Under the RWA the off-axis component of RX and RY vanishes and is dropped.
+
+    This holds for single-quadrature envelopes such as the Gaussian.
+    """
     from jaqsi.evolution import PendingEvolution
 
     def circuit(w):
@@ -267,10 +273,88 @@ def test_rwa_rotations_are_single_term():
         PulseGates.RY(w, wires=0)
 
     for rwa, n_terms in ((True, 1), (False, 2)):
-        PulseInformation.set_rwa(rwa)
+        PulseInformation.set_envelope("gaussian", rwa=rwa)
         tape = Script(circuit, n_qubits=1).record(0.3)
         ops = [op for op in tape if isinstance(op, PendingEvolution)]
         assert [len(op._inputs[1]) for op in ops] == [n_terms, n_terms]
+
+
+def test_drag_drives_a_second_quadrature():
+    """DRAG keeps its quadrature under the RWA, so RX and RY take the matrix ODE.
+
+    The quadrature drives Y for RX and -X for RY.  The calibrated defaults
+    still implement the target rotations.
+    """
+    from jaqsi.evolution import PendingEvolution
+    from jaqsi.gateset import RX as OpRX, RY as OpRY
+
+    PulseInformation.set_envelope("drag", rwa=True)
+    p = jnp.array([0.4, 0.5, 1.3, 1.4, 1.0])  # [A, beta, sigma, T, w]
+    q = 0.5 * PulseEnvelope.drag_quadrature(p, 0.3, 0.7) * p[-1]
+    assert q != 0.0
+    assert jnp.isclose(PulseGates._coeff_RX_Y(p, 0.3), q, atol=1e-12)
+    assert jnp.isclose(PulseGates._coeff_RY_X(p, 0.3), -q, atol=1e-12)
+
+    for pulse_gate, target_gate in ((PulseGates.RX, OpRX), (PulseGates.RY, OpRY)):
+        tape = Script(lambda w: pulse_gate(w, wires=0), n_qubits=1).record(0.3)
+        (op,) = [op for op in tape if isinstance(op, PendingEvolution)]
+        assert len(op._inputs[1]) == 2
+        assert op._inputs[0].shape == (2, 2, 2, 2)  # matrix ODE, no closed form
+
+        for w in (jnp.pi / 4, jnp.pi / 2, jnp.pi):
+            pulse = Script(lambda: pulse_gate(w, wires=0), n_qubits=1)
+            target = Script(lambda: target_gate(w, wires=0), n_qubits=1)
+            overlap = jnp.vdot(
+                target.execute(type="state"), pulse.execute(type="state")
+            )
+            assert jnp.isclose(jnp.abs(overlap) ** 2, 1.0, atol=1e-2)
+            assert jnp.isclose(jnp.angle(overlap), 0.0, atol=1e-2)
+
+
+ENVELOPES = [name for name in PulseEnvelope.available() if name != "general"]
+
+
+@pytest.mark.parametrize("envelope", [e for e in ENVELOPES if e != "drag_legacy"])
+def test_envelopes_are_centred_at_the_pulse_midpoint(envelope):
+    """Every envelope peaks at ``T / 2`` and is symmetric around it.
+
+    The DRAG quadrature ``-beta dE/dt`` is odd around the centre instead, so
+    that its area vanishes.  ``drag_legacy`` keeps the running centre ``t / 2``
+    of earlier versions on purpose.
+    """
+    PulseInformation.set_envelope(envelope, rwa=True)
+    pp = PulseInformation.RX.params
+    if envelope == "drag":
+        pp = pp.at[1].set(0.3)  # the calibrated beta leaves Q silent
+    T = pp[-1]
+    p = jnp.concatenate([pp, jnp.ones(1)])  # [envelope params..., T, w]
+    ts = jnp.linspace(0.0, T, 7)
+
+    env = jax.vmap(lambda t: PulseGates._coeff_RX_X(p, t))
+    quad = jax.vmap(lambda t: PulseGates._coeff_RX_Y(p, t))
+    assert jnp.allclose(env(ts), env(T - ts), atol=1e-12)
+    assert jnp.allclose(quad(ts), -quad(T - ts), atol=1e-12)
+    assert env(ts)[3] == jnp.max(env(ts))
+    if envelope == "drag":
+        assert jnp.abs(quad(ts[:1])[0]) > 1e-3
+
+
+@pytest.mark.parametrize("envelope", ENVELOPES)
+@pytest.mark.parametrize("gate", ["RX", "RY"])
+def test_calibrated_defaults_implement_rotations(envelope, gate):
+    """The shipped defaults of every envelope implement RX and RY under the RWA."""
+    from jaqsi import gateset
+
+    PulseInformation.set_envelope(envelope, rwa=True)
+    pulse_gate = getattr(PulseGates, gate)
+    target_gate = getattr(gateset, gate)
+
+    for w in (jnp.pi / 4, jnp.pi / 2, jnp.pi):
+        pulse = Script(lambda: pulse_gate(w, wires=0), n_qubits=1)
+        target = Script(lambda: target_gate(w, wires=0), n_qubits=1)
+        overlap = jnp.vdot(target.execute(type="state"), pulse.execute(type="state"))
+        assert jnp.isclose(jnp.abs(overlap) ** 2, 1.0, atol=1e-2)
+        assert jnp.isclose(jnp.angle(overlap), 0.0, atol=1e-2)
 
 
 def test_closed_form_matches_matrix_ode():
@@ -283,6 +367,7 @@ def test_closed_form_matches_matrix_ode():
     from jaqsi.gateset import PauliZ
     from jaqsi.operations import Hermitian
 
+    PulseInformation.set_envelope("gaussian", rwa=True)
     X = Hermitian(PulseGates.X, wires=0, record=False)
     Y = Hermitian(PulseGates.Y, wires=0, record=False)
 
@@ -291,7 +376,7 @@ def test_closed_form_matches_matrix_ode():
             H = PulseGates._coeff_RY_X * X + PulseGates._coeff_RY_Y * Y
         else:
             H = PulseGates._coeff_RY_Y * Y
-        p = jnp.concatenate([pp[:-1], jnp.atleast_1d(w)])
+        p = jnp.concatenate([pp, jnp.atleast_1d(w)])
         H.evolve()([p] * H.n_terms, pp[-1])
         PulseGates.RX(w / 3, wires=1)
         PulseGates.CZ(wires=[0, 1], pulse_params=cz)

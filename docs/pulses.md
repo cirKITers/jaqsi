@@ -1,26 +1,19 @@
 # Pulses
 
-Our framework allows constructing circuits at the **pulse level**, where each gate is implemented as a time-dependent control pulse rather than an abstract unitary.  
-This provides a more fine-grained access to the simulation of the underlying physical process.
-While we provide a developer-oriented overview in this section, we would like to highlight [Tilmann's Bachelor's Thesis](https://doi.org/10.5445/IR/1000184129) if you want to have a more detailed read into pulse-level simulation and quantum Fourier models.
+At the **pulse level**, a gate stops being a black box: it becomes a time-dependent control pulse. You can follow the underlying Hamiltonian evolution and see what changes when you tune the pulse. This page introduces the implementation; [Tilmann's bachelor's thesis](https://doi.org/10.5445/IR/1000184129) goes deeper into pulse simulation and quantum Fourier models.
 
-Note that we support GPU-accelerated pulse-level simulation, but keep in mind that pulse-level ODE solves are latency-bound on a GPU.
-This means that `jaqsi.Evolution.set_solver_defaults(host_offload=True)` keeps them on the CPU while the circuit runs on the GPU, which pays off below roughly a thousand solves per call (forward simulation and eager gradients; not inside a jitted gradient).
-The following three points can help you make a decision on when to run what on which device with or without the `host_offload` flag:
+JAQSI can run pulse simulation on a GPU, but each pulse requires an ODE solve. For small solves, GPU launch overhead can outweigh the compute. `jaqsi.Evolution.set_solver_defaults(host_offload=True)` runs those solves on the CPU while the rest of the circuit remains on the GPU. This works for forward simulation and eager gradients, but not inside a jitted gradient.
 
-- Small batch, low num. qubits: CPU-only is fastest. The flag makes the GPU the second-best option instead of the worst, but it cannot beat the CPU because the gate part is trivial and the offload adds a round trip.
-- Small batch, large num. qubits: Gate part starts to dominate and favors the GPU (16 qubits: 5.1 ms on CPU vs 0.6 ms on GPU at gate level). Here the flag should beat CPU-only.
-- Large batch (above roughly a thousand solves per call): GPU with the flag off is fastest, and with the flag on, CPU speed is expected.
+The best device choice depends on both circuit width and the number of solves. Small circuits with few pulses may run best on the CPU. As circuits grow, GPU gate operations become more useful; with many pulse solves per call, keeping the solves on the GPU may also help. Benchmark the options for your workload.
 
-We implement a fundamental set of gates (RX, RY, RZ, CZ) upon which other, more complex gates can be built.
-The dependency graph is shown in the following figure:
+RX, RY, RZ, and CZ form the fundamental pulse gate set. Other gates are decomposed into these gates, as shown below:
+
 ![Dependency Graph](figures/pulse_gates_dependencies_light.png#center#only-light)
 ![Dependency Graph](figures/pulse_gates_dependencies_dark.png#center#only-dark)
-In this graph, the edge weights represent the number of child gates required to implement a particular gate.
-The gates at the bottom represent the fundamental gates.
 
-Pulse gates are reached through the same entry point as every other gate, `Gates`.
-Pulse simulation is enabled per call by adding the `pulse=True` keyword argument, e.g.:
+Read the graph from the bottom up: the fundamental gates sit at the bottom, and each edge weight counts the child gates used in a decomposition.
+
+Pulse gates use the same `Gates` entry point as unitary gates. Add `pulse=True` to an individual call:
 
 ```python
 from jaqsi import Gates
@@ -28,14 +21,11 @@ from jaqsi import Gates
 Gates.CY(wires=[0, 1], pulse=True)
 ```
 
-Because the flag lives on the call, the same circuit function can run at either level, and a
-circuit can mix the two.  Calling `PulseGates` directly bypasses the noise handling and
-pulse-parameter management that `Gates` performs, so prefer the flag.
+Because the flag applies per call, the same circuit function can use pulse gates, unitary gates, or both. Use the `Gates` interface so noise and pulse parameters are handled consistently; calling `PulseGates` directly bypasses that handling.
 
 ## Pulse Parameters per Gate
 
-You can use the `PulseInformation` class in `jaqsi.gates` to access both the number and optimized values of the pulse parameters for each gate.
-Consider the following code snippet:
+`PulseInformation` provides each gate's pulse parameter count and optimized values. It also exposes the gate's decomposition and its leaf parameters:
 
 ```python
 from jaqsi.gates import PulseInformation as pinfo
@@ -43,7 +33,7 @@ from jaqsi.gates import PulseInformation as pinfo
 gate = "CX"
 
 print(f"Number of pulse parameters for {gate}: {pinfo.num_params(gate)}")
-# Number of pulse parameters for CX: 11
+# Number of pulse parameters for CX: 9
 
 gate_instance = pinfo.gate_by_name(gate)
 
@@ -51,30 +41,25 @@ print(f"Childs of {gate}: {gate_instance.childs}")
 # Childs of CX: [H, CZ, H]
 
 print(f"All parameters of {gate}: {len(gate_instance.params)}")
-# All parameters of CX: 11
+# All parameters of CX: 9
 
 print(f"Leaf parameters of {gate}: {len(gate_instance.leaf_params)}")
-# Leaf parameters of CX: 6
+# Leaf parameters of CX: 5
 ```
 
-Looking back at the dependency graph, we can easily see where the discrepancy between the overall number of parameters and the number of leaf parameters comes from.
-The CX gate is composed of two Hadamard gates, which in turn are decomposed into RY and RZ gates.
-By default, our implementation assumes that you want to treat each rotational gate equally, thus the number of leaf parameters is just the "unique" number of parameters resulting after merging multiple occurrences of the same gate type.
-However, it is also possible to override this behavior, as we will see in the following example.
+The leaf count is smaller than the full count for a reason: CX contains two Hadamard gates, and each Hadamard decomposes into RY and RZ. By default, occurrences of the same leaf gate share parameters. The leaf count therefore represents the distinct values that need tuning, while the full count includes repeated occurrences. You can override the defaults for a call.
 
 ## Calling Gates in Pulse Mode
 
-To execute a gate in pulse mode, provide `pulse=True` when calling it on `Gates`.  
-Optional `pulse_params` can be passed; if omitted, optimized default values are used:
+When `pulse_params` is omitted, `Gates` uses the optimized defaults for the active envelope. To experiment, pass your own values for a call:
 
 ```python
 w = 3.14159
 
-# CX gate with default optimized pulse parameters 
-# (gates of equal type will receive equal pulse parameters)
+# CX with default parameters shared across equal leaf gates
 Gates.CX(wires=[0, 1], pulse=True)
 
-# CX gate with custom pulse parameters (overwriting default pulse parameters)
+# CX with custom pulse parameters
 pulse_params = pinfo.gate_by_name("CX").params * 1.1
 Gates.CX(wires=[0, 1], pulse=True, pulse_params=pulse_params)
 
@@ -90,13 +75,35 @@ Each pulse is shaped by an envelope. The available envelopes can be queried with
 from jaqsi.gates import PulseEnvelope
 
 print(PulseEnvelope.available())
-# ['gaussian', 'square', 'cosine', 'drag', 'sech', 'general']
+# ['gaussian', 'square', 'cosine', 'drag', 'sech', 'drag_legacy', 'general']
 ```
 
-The default is `drag`. The envelope is a process-global setting, switched with `PulseInformation.set_envelope("gaussian")`.
-Parameter counts depend on the envelope; the counts above are for `drag`.
+The default is `gaussian`. The envelope is a process-global setting, switched with `PulseInformation.set_envelope("drag")`.
+Parameter counts depend on the envelope; the counts above are for `gaussian`.
 
-Under the hood, pulse gates are simulated by integrating their time-dependent Hamiltonian. The ODE solver can be configured via `Evolution.set_solver_defaults`, where `solver` is one of `"dopri8"` (default), `"dopri5"`, `"magnus2"` or `"magnus4"`:
+Every envelope except `drag` drives a single quadrature: its envelope $E(t)$ modulates the carrier $\cos(\omega_c t + \phi)$, with $\phi = 0$ for `RX` and $\phi = \pi/2$ for `RY`.
+The envelope is centered at the midpoint $T/2$ of the pulse, where the duration $T$ is the last pulse parameter of `RX` and `RY`.
+`gaussian` is lifted like Qiskit's [`Gaussian`](https://quantum.cloud.ibm.com/docs/api/qiskit/1.4/qiskit.pulse.library.Gaussian), so that it vanishes at the pulse edges instead of switching on and off with a step.
+With parameters $[A, \sigma]$ and $g(t) = e^{-(t - T/2)^2 / (2\sigma^2)}$, its envelope is
+
+$$
+E(t) = A\,\frac{g(t) - g(0)}{1 - g(0)},
+$$
+
+which peaks at $A$ in $T/2$ and is zero at $t = 0$ and $t = T$.
+For $\sigma \gg T$, it tends to the parabola $4 A t (T - t) / T^2$.
+`drag` (Derivative Removal by Adiabatic Gate) follows [Motzoi et al. (2009)](https://doi.org/10.1103/PhysRevLett.103.110501) and adds a second control on the orthogonal carrier $\cos(\omega_c t + \phi + \pi/2)$.
+With parameters $[A, \beta, \sigma]$, the in-phase envelope $E(t)$ is the lifted Gaussian above, and the quadrature envelope is its derivative $Q(t) = -\beta \dot{E}(t)$, where $\beta$ takes the place of the inverse anharmonicity $1/\Delta$ in Eq. (9) of Motzoi et al. (see also [Gambetta et al. (2011)](https://doi.org/10.1103/PhysRevA.83.012308)).
+While $E$ vanishes at the pulse edges, $\dot{E}$ does not, so $Q$ starts and ends with a step.
+Qiskit's [`Drag`](https://quantum.cloud.ibm.com/docs/api/qiskit/1.4/qiskit.pulse.library.Drag) instead takes its quadrature proportional to $\beta\,(t - T/2)\,E(t) / \sigma^2$, which vanishes at the edges but is not the derivative of the lifted $E$.
+Under the RWA, `RX(w)` then evolves under $\frac{w}{2}\left(E X + Q Y\right)$ and `RY(w)` under $\frac{w}{2}\left(E Y - Q X\right)$.
+Note that jaqsi models qubits as two-level systems, so there is no leakage level for the quadrature to suppress.
+As $E$ is symmetric around $T/2$, $Q$ is odd around it and adds no net area, but it does not commute with the in-phase drive and adds an error about the $Z$ axis whose angle grows as $\beta w^2$, the second term of the [Magnus expansion](https://doi.org/10.1016/j.physrep.2008.11.001).
+Under the RWA, the Gaussian alone already implements the target rotation, which is why the calibrated defaults have $\beta \approx 0$ (below $10^{-12}$) and `drag` then reproduces `gaussian`.
+
+For backward compatibility, `drag_legacy` restores the pulse model of `drag` up to jaqsi 2a9132f, to reproduce results obtained with those versions.
+
+Pulse gates integrate a time-dependent Hamiltonian. Configure the solver with `Evolution.set_solver_defaults`; available solvers are `"dopri8"` (default), `"dopri5"`, `"magnus2"`, and `"magnus4"`:
 
 ```python
 from jaqsi import Evolution
@@ -108,26 +115,21 @@ The `magnus_steps` argument sets the number of fixed substeps for the Magnus int
 
 A drive with a single term, $H(t) = f(t)\,H$, commutes with itself at all times, so its gate is $e^{-i F H}$ with $F = \int f(t)\,dt$.
 The Dormand-Prince solvers then integrate the scalar $F$ only, which takes a handful of steps whatever the rotation angle, whereas the matrix ODE needs more steps the larger the angle.
-Under the RWA (the default) every pulse gate is such a drive; without it, `RX` and `RY` keep two non-commuting terms and are integrated as a matrix ODE.
+`RZ` and `CZ` are always such drives, and so are `RX` and `RY` under the RWA with a single-quadrature envelope such as `gaussian`.
+With `drag`, or without the RWA, `RX` and `RY` keep two non-commuting terms and are integrated as a matrix ODE.
 `Evolution.set_solver_defaults(closed_form=False)` integrates single-term drives as a matrix ODE as well, e.g. to compare against simulators that do not exploit this.
 
 The Magnus integrators and the single-term drives return exactly unitary gates, the Dormand-Prince solvers of the matrix ODE only up to their tolerance (about 1e-10 per gate in double precision).
 This matters for gradients of expectation values, which are computed with the adjoint method (see [training](training.md#how_gradients_are_computed)) and reconstruct intermediate states by inverting gates as unitaries.
 The resulting error grows linearly with the number of pulse gates, so for circuits with thousands of them prefer a Magnus solver.
 
-Note that pulse gates are solved lazily when the circuit is simulated.
-This means that all gates of a tape that share a pulse shape are integrated in one batched solve, and gates with identical parameters (the same fixed-angle rotation on several wires, every CZ) are solved only once.
-This keeps compile times short and matters most on a GPU, where each separate solve costs a few milliseconds of launch latency.
+Pulse gates are solved lazily when the circuit runs, rather than when they are recorded. Gates with the same pulse shape share one batched solve, while gates with identical parameters, such as repeated fixed-angle rotations, are solved only once. This avoids compiling a separate solver for each gate.
 
 ## Quantum Optimal Control
 
-Our package provides a Quantum Optimal Control (QOC) interface for directly optimizing pulse parameters for specific gates.  
-Conceptually the provided QOC class contains methods to create test circuits (`create_GATE`) which return two circuits, one using the pulse-level implementation of `GATE` and the other using the unitary-level implementation of `GATE`.
-For the specific implementation of these methods, we refer to the documentation of the `QOC` class.
-To test a broad range of states, each of these circuits includes not only `GATE` itself but also other, unitary-based gates.
-Those usually take a parameter `w`, allowing one to sweep through the parameter space and validate whether `GATE` actually mimics its unitary counterpart.
+`QOC` helps find pulse parameters that behave like the intended gate. It compares a pulse gate with its ideal unitary counterpart. Its `create_GATE` methods build a pair of test circuits, one for each implementation. Other unitary gates in those circuits prepare different input states, so matching a gate on one input alone is not enough. A parameter `w` lets the comparison cover different gate angles. See the `QOC` API reference for the individual circuit factories.
 
-Using the standard parameter specification, we can initialize the QOC class:
+Create a `QOC` instance with the default parameters:
 
 ```python
 from jaqsi.qoc import QOC, default_qoc_params
@@ -135,27 +137,24 @@ from jaqsi.qoc import QOC, default_qoc_params
 qoc = QOC(**default_qoc_params)
 ```
 
-For a detailed description of available arguments, we refer to the documentation of the `QOC` class.
-Now, we can select gates by passing `sel_gates=["GATE"]` when calling `optimize_all`:
+Pass `sel_gates` to `optimize_all` to choose which gates to tune:
 
 ```python
 qoc.optimize_all(sel_gates=["RX", "RY", "RZ", "CZ"])
 ```
 
-which will run the optimization for the specified gates.
-The output of the optimization is logged to `qoc_logs.csv` whereas the resulting pulse parameters are stored in `qoc_results_<envelope>.csv`.
+The run writes optimization logs to `qoc_logs.csv` and the resulting pulse parameters to `qoc_results_<envelope>.csv`.
   
-Internally, a multi-objective cost function is utilized to tune the pulse parameters of the basis gates.
-Primarily, the fidelity between the pulse gate and a target unitary is optimized, but the default setting also takes into account the width of the pulse and a time normalization.
-For the exact weighting between these cost functions, we refer to `default_qoc_params`.
+QOC uses a weighted cost to compare each pulse gate with its target unitary. By default, it combines process infidelity and phase error; pulse width and evolution time can be added as optional terms. The weights and other optimization settings are listed in `default_qoc_params`.
 
-Besides the cost functions and their respective weights, you can also specify the envelope used for the pulse gate.
+You can also select the pulse envelope.
+Under the RWA, the rotation of a single-quadrature pulse only depends on its area $\int_0^T E(t)\,dt$, so the calibration fixes the area but leaves the shape of the pulse open.
 
-For further examples we refer to our ["Pulses" notebook](https://github.com/cirKITers/jaqsi/blob/main/docs/pulses.ipynb).
+The [pulses notebook](https://github.com/cirKITers/jaqsi/blob/main/docs/pulses.ipynb) has more gates to try.
 
-With the optimized pulse parameters we can generate a fidelity plot as follows:
+The optimized parameters produce these gate fidelities:
 
 ![Gate Fidelities](figures/gates_fidelities_light.png#center#only-light)
 ![Gate Fidelities](figures/gates_fidelities_dark.png#center#only-dark)
 
-Note that in this plot, the phase error is shown as $1-\text{phase error}$ to align it with the fidelity scale.
+The plot shows phase error as $1-\text{phase error}$ to match the fidelity scale.

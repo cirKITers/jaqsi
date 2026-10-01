@@ -1,63 +1,45 @@
 # Contributing to JAQSI
 
-Contributions are highly welcome! :hugging_face:
+Contributions are welcome! Here is the usual path:
 
-Start of by..
-1. Creating an issue using one of the templates (Bug Report, Feature Request)
-   - let's discuss what's going wrong or what should be added
-   - can you contribute with code? Great! Go ahead! :rocket: 
-2. Forking the repository and working on your stuff. See the sections below for details on how to set things up.
-3. Creating a pull request to the main repository
+1. Open an issue using the bug report or feature request template.
+2. Fork the repository and make your changes.
+3. Open a pull request.
 
 ## Setup
 
-Contributing to this project requires some more dependencies besides the "standard" packages.
-Those are specified in the groups `dev` and `docs`.
+Install the `dev` and `docs` dependency groups:
 ```
 uv sync --all-groups
 ```
 
-Additionally, we have pre-commit hooks in place, which can be installed as follows: 
+Install the pre-commit hooks:
 ```
-uv run pre-commit autoupdate
 uv run pre-commit install
 ```
 
-Currently the only purpose of the hook is to run Ruff on commit which will do some code formatting for you.
-However be aware, that this might reject your commit and you have to re-do the commit.
+The hook runs Ruff before each commit, so formatting issues are caught early.
 
 ## Testing
 
-We do our testing with Pytest.
-There are Github action pipelines in place, that will do linting and testing once you open a pull request.
-However, it's a good idea to run tests and linting (Ruff and Ty) locally before pushing, e.g.
+Run the checks before opening a pull request:
 ```
-uv run ruff format jaqsi tests
-uv run ruff check --fix jaqsi tests
+uv run ruff format --check jaqsi tests
+uv run ruff check jaqsi tests
 uv run pytest --dist load -m "not benchmark" -n auto
 ```
-Which will run all tests that are not marked as benchmarks.
-See [Pytest](https://pytest.org/) for more details on how to run specific tests only.
+The pytest command skips benchmarks, which helps keep the feedback loop short. CI runs the project checks again on your pull request.
 
 ## Packaging
 
-Packaging is done automagically using Github actions.
-This action is triggered when a new version is being detected in the `pyprojec.toml` file.
-This works by comparing the output of `uv version --short` against `git tag` and triggering the publishing process if those differ.
-Publishing includes
-- setting the git tag equal to the version specified in `pyproject.toml`
-- creating a release with the current git tag and automatically generated release notes
-- publishing the package to PyPI using the stored credentials
+GitHub Actions publishes a release when the version in `pyproject.toml` differs from the latest Git tag. The workflow tags the release, generates release notes, and publishes to PyPI.
 
 ## Documentation
 
-We use Zensical for our documentation. To run a server locally, run:
+For a live look at documentation changes, start the Zensical preview:
 ```
 uv run zensical serve
 ```
-This will automatically trigger a rebuild each time you make changes.
-See the [Zensical Documentation](https://zensical.org/) for more details.
+The preview rebuilds when files change. See the [Zensical documentation](https://zensical.org/) for details.
 
-Publishing (and building) the documentation is done automagically using Github actions.
-Note that we're building with `--strict` mode enabled, meaning that any warnings that you might see will be treated as errors.
-This action is triggered when a new release is made.
+GitHub Actions builds and publishes the documentation on release. The strict build treats warnings as errors.

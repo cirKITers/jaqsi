@@ -355,10 +355,11 @@ class Operation:
         chaining ``Gate(...).dagger()``), it is replaced by the daggered
         operation so that only U\\dagger appears on the tape —
         not both U and ``U\\dagger``.
-        Note that this should only be called immediately after the tape is updated.s
+        Call immediately after creating this operation so it is still the
+        tape's last entry.
 
         Args:
-            op (Operation): New replaced operation on the tape
+            op: Operation to record.
         """
         # If self was recorded on the tape, replace it with the daggered op.
         tape = active_tape()
