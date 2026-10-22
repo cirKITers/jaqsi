@@ -66,7 +66,7 @@ def active_pulse_tape() -> Optional[list]:
     """Return the innermost active pulse-event tape, or ``None``.
 
     Called from :class:`~jaqsi.gates.PulseGates` leaf methods
-    to record :class:`~jaqsi.drawing.PulseEvent` objects.
+    to record :class:`~jaqsi.hardware.schedule.PulseEvent` objects.
     """
     stack = _pulse_tape_stack()
     return stack[-1] if stack else None
@@ -78,7 +78,7 @@ def pulse_recording() -> Iterator[list]:
 
     Yields:
         A list that will be populated with
-        :class:`~jaqsi.drawing.PulseEvent` instances.
+        :class:`~jaqsi.hardware.schedule.PulseEvent` instances.
     """
     stack = _pulse_tape_stack()
     tape: list = []
