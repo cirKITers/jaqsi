@@ -589,9 +589,10 @@ class PulseEnvelope:
         ``rwa=False``  keeps **both** the slow and the fast
         counter-rotating components.
 
-        Each returned function has a unique ``__code__`` object so the
-        jaqsi solver cache assigns separate compiled XLA programs per
-        envelope shape and per (gate, component) pair.
+        Each returned function has its own ``__code__`` object, and the
+        jaqsi solver cache also keys on the envelope it closes over, so it
+        assigns separate compiled XLA programs per envelope shape and per
+        (gate, component) pair.
 
         The parameter array is ``p = [envelope params..., T, w]``: the
         rotation angle ``w`` is its last element and the pulse duration
@@ -978,13 +979,11 @@ class PulseInformation:
         PulseGates._active_rwa = cls._rwa
         PulseGates._active_frame = cls._frame
 
-        # The compiled-solver cache in ``Evolution`` is keyed on the code
-        # objects of the coefficient functions.  Rebuilding the coeff
-        # fns above produced fresh code objects, so any cached solver
-        # is now unreachable from the live coefficient functions and
-        # must be evicted to avoid both (a) holding compiled programs
-        # for a previous configuration alive forever and (b) returning
-        # a stale program if ``id`` collisions ever leaked through.
+        # The compiled-solver cache in ``Evolution`` keys on the code and
+        # the captured values of the coefficient functions, so the coeff
+        # fns rebuilt above never reuse a solver of the previous
+        # configuration.  Evict those solvers anyway: the cache would keep
+        # their compiled programs alive otherwise.
         Evolution.clear_evolve_solver_cache()
 
         log.info(
@@ -1280,7 +1279,8 @@ class PulseGates:
         if ptape is None:
             return
 
-        from jaqsi.drawing import PulseEvent, LEAF_META
+        from jaqsi.drawing import LEAF_META
+        from jaqsi.hardware.schedule import PulseEvent
 
         meta = LEAF_META.get(gate_name, {})
         wires_list = [wires] if isinstance(wires, int) else list(wires)
