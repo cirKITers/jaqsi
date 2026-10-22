@@ -27,7 +27,7 @@ from jaqsi.operations import (
 
 class Evolution:
     # Module-level cache for JIT-compiled ODE solvers.  Keyed on
-    # (coeff_fn_id, dim, atol, rtol, max_steps, throw) so that all
+    # (_coeff_key per coeff fn, dim, atol, rtol, max_steps, throw) so that all
     # evolve() calls with the same pulse shape function and matrix size
     # share one compiled XLA program.  This turns O(n_gates) JIT
     # compilations into O(n_distinct_pulse_shapes) during pulse-mode
@@ -158,12 +158,11 @@ class Evolution:
     def clear_evolve_solver_cache(cls) -> None:
         """Drop every cached compiled evolve solver.
 
-        Call this whenever the coefficient functions referenced by the
-        cache keys are rebuilt (e.g. when :class:`PulseGates` swaps in
-        a new pulse envelope, RWA flag or frame).  Without an explicit
-        eviction the cache keeps the old code objects alive and would
-        also retain XLA programs that no longer match any active
-        coefficient function.
+        The cache keys hold what the coefficient functions capture (see
+        :func:`_coeff_key`), so rebuilt functions never reuse a stale
+        solver.  Call this to release the solvers of functions no longer
+        in use (e.g. when :class:`PulseGates` swaps in a new pulse
+        envelope, RWA flag or frame); the cache keeps them alive otherwise.
         """
         with cls._evolve_solver_cache_lock:
             cls._evolve_solver_cache.clear()
@@ -490,7 +489,8 @@ class Evolution:
           adaptive solvers, see :meth:`_build_closed_form_evolve_solver`.
 
         - The JIT-compiled solver is cached per coefficient-function code
-          tuple (and ``dim``, tolerances) so multiple ``evolve()`` calls
+          and captured values (see :func:`_coeff_key`), ``dim`` and
+          tolerances, so multiple ``evolve()`` calls
           with the same pulse shape — but different Hamiltonian matrices
           or parameters — reuse the same compiled XLA program.
 
@@ -568,18 +568,19 @@ class Evolution:
             eigen = (lam.astype(np_rdtype), V.astype(np_cdtype))
         solve_bytes = memory.solve_bytes(dim, solver_name, eigen is not None)
 
-        # Cache key:  every coeff fn's code object (same shape of pulse
-        # fns -> same JIT program) plus dim, tolerances, solver choice and
-        # budget (different budgets mean different XLA programs); the
-        # ``throw`` flag is appended per solver variant.  We use the code
-        # object itself (hashable, identity-equal) rather than
+        # Cache key:  every coeff fn's code object and captured values
+        # (same pulse shape -> same JIT program, see ``_coeff_key``) plus
+        # dim, tolerances, solver choice and budget (different budgets mean
+        # different XLA programs); the ``throw`` flag is appended per solver
+        # variant.  ``resolve_pending`` batches the gates of one key.  We use
+        # the code object itself (hashable, identity-equal) rather than
         # ``id(fn.__code__)``: ids can be reused for later code objects
         # after the original is garbage-collected, which would silently
         # return a stale compiled solver for a different pulse shape.
         # Holding the code object in the cache keeps it alive for as long
         # as the cached program is valid.
         base_key = (
-            tuple(fn.__code__ for fn in coeff_fns),
+            tuple(_coeff_key(fn) for fn in coeff_fns),
             dim,
             atol,
             rtol,
@@ -811,6 +812,34 @@ def _on_host(fn: Callable) -> Callable:
             return fn(*args)
 
     return wrapped
+
+
+def _coeff_key(fn: Any) -> tuple:
+    """Key of a coefficient function in the solver cache and the batches.
+
+    Closures built by one factory share a code object and differ only in the
+    values bound to them, such as the envelope a coefficient closes over, so
+    the key holds the code and those values: the closure cells, the default
+    arguments and, for a bound method, the instance.  A hashable value is
+    compared by type and value, a function thus by identity.  An unhashable
+    one, such as an array, is compared by its id.  That is sound because a
+    cached solver keeps the function it was built from alive, as a pending
+    gate keeps its own, so no other object can take the id while a key
+    holding it is in use.  Values the function looks up when called, such as
+    globals or attributes, are not part of the key.
+    """
+    bound = [cell.cell_contents for cell in fn.__closure__ or ()]
+    bound += [*(fn.__defaults__ or ()), *(fn.__kwdefaults__ or {}).values()]
+    bound.append(getattr(fn, "__self__", None))
+    key: List[Any] = [fn.__code__]
+    for value in bound:
+        try:
+            hash(value)
+        except TypeError:
+            key.append(("id", id(value)))
+        else:
+            key.append((type(value), value))
+    return tuple(key)
 
 
 def _leaf_key(x: Any) -> tuple:
