@@ -18,12 +18,13 @@ class QubitConfig:
     Calibration fills these and every backend plays with them: the qiclib
     binding writes them to the controller, the mock reads the drive
     frequency, amplitude scale and time scale.  How the qubit itself behaves
-    (its resonance, relaxation and readout) is not programmed; the mock
-    simulates it from a :class:`~jaqsi.hardware.mock.MockQubit`.
+    (its resonance, Rabi rate, relaxation and readout) is not programmed; the
+    mock simulates it from a :class:`~jaqsi.hardware.mock.MockQubit`.
 
     Times are in seconds and frequencies in hertz.  jaqsi is dimensionless,
     and under the RWA a rotation depends only on the pulse area, so a time
-    and an amplitude scale bridge its units to the device.
+    and an amplitude scale bridge its units to the device.  The area grows
+    with their product, so a new time scale needs a new amplitude scale.
 
     Attributes:
         drive_frequency: Frequency of the drive oscillator, the intermediate
@@ -75,6 +76,41 @@ class Backend(ABC):
             row per measured wire: 0, 1, or 2 for a leakage state.
         """
 
+    def run_batch(self, schedules: List[Schedule], shots: int) -> np.ndarray:
+        """Play each schedule for *shots* shots and classify each readout.
+
+        Plays one schedule after the other; a backend that plays a batch
+        faster overrides this.
+
+        Args:
+            schedules: Schedules to play, e.g. one per sample of a batch.
+            shots: Number of shots per schedule.
+
+        Returns:
+            Integer labels of shape ``(len(schedules), n_measured, shots)``,
+            those of :meth:`run` for each schedule.
+        """
+        return np.stack([self.run(schedule, shots) for schedule in schedules])
+
+
+def diagonals(obs: List[Operation], n_qubits: int) -> List[jnp.ndarray]:
+    """Diagonal of each observable's matrix on *n_qubits* qubits.
+
+    Raises:
+        ValueError: If an observable is not diagonal.
+    """
+    diags = []
+    for ob in obs:
+        O_mat = ob.lifted_matrix(n_qubits)
+        diag = jnp.diag(O_mat)
+        if not jnp.allclose(O_mat, jnp.diag(diag)):
+            raise ValueError(
+                f"Observable {ob.name!r} is not diagonal; "
+                "a backend measures in the computational basis only."
+            )
+        diags.append(diag)
+    return diags
+
 
 def labels_to_result(
     labels: np.ndarray, type: str, obs: Optional[List[Operation]] = None
@@ -111,16 +147,7 @@ def labels_to_result(
         return probs, leakage
 
     if type == "expval":
-        results = []
-        for ob in obs or []:
-            O_mat = ob.lifted_matrix(n_qubits)
-            diag = jnp.diag(O_mat)
-            if not jnp.allclose(O_mat, jnp.diag(diag)):
-                raise ValueError(
-                    f"Observable {ob.name!r} is not diagonal; "
-                    "a backend measures in the computational basis only."
-                )
-            results.append(jnp.real(jnp.dot(diag, probs)))
+        results = [jnp.real(jnp.dot(d, probs)) for d in diagonals(obs or [], n_qubits)]
         return jnp.array(results), leakage
 
     raise ValueError(f"A backend returns 'probs' or 'expval', got {type!r}.")
