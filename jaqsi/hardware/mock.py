@@ -21,15 +21,17 @@ class MockQubit:
 
     Nothing here is programmed: calibration only sees it through the readout
     and estimates the programmed :class:`~jaqsi.hardware.backend.QubitConfig`
-    from it.  A qubit whose ``frequency`` and ``amplitude_scale`` equal the
-    programmed ``drive_frequency`` and ``amplitude_scale`` makes a perfectly
-    calibrated mock.  Times are in seconds and frequencies in hertz.
+    from it.  A qubit whose ``frequency`` equals the programmed
+    ``drive_frequency``, and whose ``rabi_rate`` is ``1 / (amplitude_scale *
+    time_scale)`` of the programmed config, makes a perfectly calibrated
+    mock.  Times are in seconds and frequencies in hertz.
 
     Attributes:
         frequency: Resonance of the qubit, an intermediate frequency like the
             programmed drive frequency.
-        amplitude_scale: True amplitude scale, the device amplitude per jaqsi
-            amplitude at which the qubit rotates as jaqsi's pulse gates do.
+        rabi_rate: Rabi frequency per unit device amplitude, in radians per
+            second: a resonant drive of device amplitude ``A`` rotates the
+            qubit at ``rabi_rate * A``.
         t1: Energy relaxation time.
         t2: Dephasing time, at most ``2 * t1``.
         iq_centers: Mean IQ point of |0>, |1> and |2>, shape ``(3, 2)``.
@@ -43,7 +45,7 @@ class MockQubit:
     """
 
     frequency: float
-    amplitude_scale: float
+    rabi_rate: float
     t1: float
     t2: float
     iq_centers: np.ndarray
@@ -60,8 +62,8 @@ class Mock(Backend):
     calibration fills as on the device, and the simulated physical qubit,
     which calibration has to find.  RX and RY pulses evolve in the frame of
     the programmed drive frequency, detuned from the qubit's resonance, with
-    the amplitude scaled by the ratio of the programmed to the true amplitude
-    scale (see :func:`_drive`).  Each qubit starts in its thermal state and
+    the amplitude scaled by the qubit's Rabi rate times the programmed amplitude
+    and time scale (see :func:`_drive`).  Each qubit starts in its thermal state and
     relaxes toward it during every physical pulse.  A shot is a sample of the
     exact probabilities.  If it is in |1>, it leaks to |2> with the leakage
     probability; if it did not leak, its readout is flipped with the readout
@@ -73,8 +75,7 @@ class Mock(Backend):
             does not model the readout settings, nor the reset time: every
             shot starts in the thermal state.
         truth: Simulated qubit behind each wire, with everything physical:
-            resonance, true amplitude scale, relaxation, thermal population
-            and readout.
+            resonance, Rabi rate, relaxation, thermal population and readout.
         rng: Random generator of the shots and the IQ noise.
         discriminator: Classifier of the IQ points in :meth:`run`, fitted
             with :func:`~jaqsi.hardware.discriminator.fit`; ``None`` until
@@ -106,16 +107,19 @@ class Mock(Backend):
 
         All leaves are single-qubit gates, so the wires commute.
         """
-        for q, items in schedule.wires.items():
+        for q in range(schedule.n_qubits):
             programmed, true = self.qubits[q], self.truth[q]
-            ratio = programmed.amplitude_scale / true.amplitude_scale
+            # The device plays amplitude_scale·w·E, which rotates the qubit at
+            # rabi_rate times that per second: ratio times jaqsi's w·E per
+            # jaqsi time unit of time_scale seconds.
+            ratio = true.rabi_rate * programmed.amplitude_scale * programmed.time_scale
             # Qubit minus drive frequency, in radians per jaqsi time unit.
             offset = true.frequency - programmed.drive_frequency
             detuning = 2 * np.pi * offset * programmed.time_scale
             BitFlip(true.thermal_population, wires=q)  # |0> -> thermal state
             # Not modeled: relaxation and precession of a qubit idling at a Sync.
-            for ev in items:
-                if not isinstance(ev, PulseEvent):
+            for ev in schedule.items:
+                if not isinstance(ev, PulseEvent) or q not in ev.wires:
                     continue
                 if ev.gate == "RZ":
                     # A virtual Z is a frame change and takes no time.
@@ -201,8 +205,8 @@ def _drive(ev: PulseEvent, ratio: float, detuning: float) -> None:
 
     Args:
         ev: RX or RY event.
-        ratio: Amplitude ratio ``r``, the programmed over the true amplitude
-            scale.
+        ratio: Amplitude ratio ``r`` of the device's drive to jaqsi's, the
+            qubit's Rabi rate times the programmed amplitude and time scale.
         detuning: ``Δ`` in radians per jaqsi time unit.
     """
     X, Y, Z = PulseGates.X, PulseGates.Y, PulseGates.Z
