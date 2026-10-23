@@ -6,16 +6,21 @@ qiclib binding are calibrated alike.  On the device every point of a sweep is
 one job.
 """
 
-from typing import List, Optional, Protocol, Tuple
+import warnings
+from typing import Callable, List, Optional, Protocol, Tuple
 
 import numpy as np
-from scipy.optimize import curve_fit
+from scipy.optimize import OptimizeWarning, curve_fit
 
 from jaqsi.gates import Gates
 from jaqsi.hardware.backend import QubitConfig, labels_to_result
 from jaqsi.hardware.discriminator import Discriminator, fit
 from jaqsi.hardware.schedule import Schedule
 from jaqsi.script import Script
+
+# Least fitted contrast in standard errors.  Five is the conventional discovery
+# threshold; noise hardly reaches it, even when the fit picks its largest spike.
+CONTRAST_Z = 5.0
 
 
 class Device(Protocol):
@@ -43,8 +48,10 @@ def gaussian(
 ) -> np.ndarray:
     """Line of a frequency sweep, ``c + a * exp(-((f - center) / width)**2 / 2)``.
 
-    ``width`` is the standard deviation; the full width at half maximum is
-    ``2 * sqrt(2 * ln 2) * width``, about ``2.355 * width``.
+    An empirical model of the line of the default pulse, not a general
+    spectroscopy line shape.  ``width`` is the standard deviation; the full
+    width at half maximum is ``2 * sqrt(2 * ln 2) * width``, about
+    ``2.355 * width``.
     """
     return c + a * np.exp(-(((f - center) / width) ** 2) / 2)
 
@@ -100,7 +107,8 @@ def frequency_sweep(
     RX(pi) is played at each drive frequency.  It excites the qubit fully
     only on resonance, so P(1) peaks there; the center of a fitted
     :func:`gaussian` becomes ``backend.qubits[wire].drive_frequency``.  If
-    the sweep or the fit fails, the drive frequency is left as it was.
+    the sweep or the fit fails, the fit shows no significant contrast or its
+    center lies outside the sweep, the drive frequency is left as it was.
 
     Args:
         backend: Backend to calibrate, with a fitted discriminator.
@@ -111,6 +119,11 @@ def frequency_sweep(
     Returns:
         ``(p1, popt)``: P(1) per frequency, leaked shots excluded, and the
         fitted ``(c, a, center, width)`` of :func:`gaussian`.
+
+    Raises:
+        ValueError: If the fit fails, leaves a parameter undetermined, has a
+            contrast ``a`` within ``CONTRAST_Z`` standard errors, or a center
+            outside *frequencies*.
     """
     config = backend.qubits[wire]
     schedule = _rx(backend, wire).schedule(np.pi)
@@ -124,7 +137,9 @@ def frequency_sweep(
         config.drive_frequency = programmed
     # The sweep spans the line and its baseline, about four widths each side.
     p0 = (p1.min(), np.ptp(p1), frequencies[np.argmax(p1)], np.ptp(frequencies) / 8)
-    popt, _ = curve_fit(gaussian, frequencies, p1, p0=p0, bounds=(0, np.inf))
+    popt = _fit(gaussian, frequencies, p1, p0)
+    if not frequencies.min() <= popt[2] <= frequencies.max():
+        raise ValueError(f"The fitted center {popt[2]:.4g} Hz lies outside the sweep.")
     config.drive_frequency = float(popt[2])
     return p1, popt
 
@@ -137,7 +152,9 @@ def rabi_sweep(
     RX(w) is played for each angle ``w``.  A device whose amplitude scale is
     off rotates by ``k * w`` instead, so a fitted :func:`rabi` divides
     ``backend.qubits[wire].amplitude_scale`` by ``k``.  The fit starts from
-    ``k = 1``, a roughly calibrated amplitude scale.
+    ``k = 1``, a roughly calibrated amplitude scale.  If the sweep or the fit
+    fails, or the fit shows no significant contrast, the amplitude scale is
+    left as it was.
 
     Args:
         backend: Backend to calibrate, with a fitted discriminator.
@@ -148,13 +165,47 @@ def rabi_sweep(
     Returns:
         ``(p1, popt)``: P(1) per angle, leaked shots excluded, and the fitted
         ``(c, a, k)`` of :func:`rabi`.
+
+    Raises:
+        ValueError: If the fit fails, leaves a parameter undetermined, or has
+            a contrast ``a`` within ``CONTRAST_Z`` standard errors.
     """
     script = _rx(backend, wire)
     p1 = np.array([_p1(backend, script.schedule(w), wire, shots) for w in angles])
     p0 = (p1.min(), np.ptp(p1), 1.0)
-    popt, _ = curve_fit(rabi, angles, p1, p0=p0, bounds=(0, np.inf))
+    popt = _fit(rabi, angles, p1, p0)
     backend.qubits[wire].amplitude_scale /= popt[2]
     return p1, popt
+
+
+def _fit(
+    model: Callable[..., np.ndarray], x: np.ndarray, p1: np.ndarray, p0: Tuple
+) -> np.ndarray:
+    """Fit *model* to P(1) with non-negative parameters, the second its ``a``.
+
+    Raises:
+        ValueError: If the fit fails or leaves a parameter undetermined, with
+            an uncertainty that is zero or not finite, or ``a`` does not
+            exceed ``CONTRAST_Z`` standard errors.
+    """
+    with warnings.catch_warnings():
+        # curve_fit warns when it cannot estimate the covariance.
+        warnings.simplefilter("error", OptimizeWarning)
+        try:
+            popt, pcov = curve_fit(model, x, p1, p0=p0, bounds=(0, np.inf))
+        except (RuntimeError, OptimizeWarning) as error:
+            raise ValueError(f"The fit of the sweep failed: {error}") from error
+    errors = np.sqrt(np.diag(pcov))
+    # curve_fit's pseudo-inverse gives an error of zero to a parameter that the
+    # sweep does not determine, such as a and k on angles that are all zero.
+    if not np.isfinite([*popt, *errors]).all() or (errors == 0).any():
+        raise ValueError(f"The fit of the sweep failed: errors {errors}.")
+    if popt[1] <= CONTRAST_Z * errors[1]:
+        raise ValueError(
+            f"The sweep shows no significant contrast: a = {popt[1]:.3g} "
+            f"+/- {errors[1]:.3g}."
+        )
+    return popt
 
 
 def _rx(backend: Device, wire: int) -> Script:
