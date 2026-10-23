@@ -10,6 +10,9 @@ from scipy.special import xlogy
 
 INT32_MAX = 2**31 - 1
 RESTARTS = 20  # k-means runs per class count
+# Least growth of the |1> share under RX(pi), in standard errors.  Five is the
+# conventional discovery threshold: shot noise exceeds it with p < 3e-7.
+GROWTH_Z = 5.0
 
 
 @dataclass
@@ -42,15 +45,20 @@ def fit(
 
     Per qubit, k-means clusters the points of both runs together into two and
     into three classes, several times from random starts, and the Bayesian
-    information criterion picks the best clustering.  |0> is the cluster
+    information criterion picks the best clustering, or one cluster around
+    the mean of all points, which leaves no |1> to name.  |0> is the cluster
     with the largest share of the thermal run.  |1> is, of the others, the
-    cluster whose share grows most from the thermal run to the RX(pi) run,
-    and a third cluster, if any, is the leakage class.  Leakage starts from
-    |1>, so the thermal run alone may hold too few leaked shots to find it.
+    cluster whose share grows most from the thermal run to the RX(pi) run.
+    A two-proportion z-test requires this growth to exceed ``GROWTH_Z``
+    standard errors, since a drive that misses the qubit leaves the shares
+    as they were.  A third cluster, if any, is the leakage class: a separate
+    readout class, not proof of physical leakage, which needs an independent
+    preparation or characterization.  Leakage starts from |1>, so the
+    thermal run alone may hold too few leaked shots to find it.
 
     Without RX(pi) points, |1> is the second most populated cluster of the
     thermal run, which assumes the thermal population of |1> exceeds the
-    leakage.
+    leakage, and only the one-cluster check applies.
 
     Args:
         iq: IQ points of the thermal state, shape ``(n_qubits, 2, shots)``.
@@ -60,6 +68,10 @@ def fit(
 
     Returns:
         Discriminator with the centers of each qubit in label order.
+
+    Raises:
+        ValueError: If the points of a qubit form one cluster, or RX(pi) does
+            not grow the share of its |1> cluster significantly.
     """
     rng = np.random.default_rng(seed)
     centers = []
@@ -67,10 +79,17 @@ def fit(
         x = points.T.astype(float)
         if iq_pi is not None:
             x = np.vstack([x, iq_pi[q].T])
-        fits = [
+        # One class needs no k-means: its center is the mean.
+        fits = [(x.mean(axis=0, keepdims=True), np.zeros(len(x), dtype=int))]
+        fits += [
             kmeans2(x, k, minit="++", rng=rng) for k in (2, 3) for _ in range(RESTARTS)
         ]
         c, labels = min(fits, key=lambda f: _bic(x, *f))
+        if len(c) == 1:
+            raise ValueError(
+                f"The IQ points of qubit {q} form one cluster; there is no "
+                "separable |1>."
+            )
         n = points.shape[1]  # thermal shots, first in x
         thermal = np.bincount(labels[:n], minlength=len(c)) / n
         if iq_pi is None:
@@ -79,6 +98,16 @@ def fit(
             growth = np.bincount(labels[n:], minlength=len(c)) / (len(x) - n) - thermal
         ground = int(np.argmax(thermal))
         others = sorted(set(range(len(c))) - {ground}, key=lambda k: -growth[k])
+        if iq_pi is not None:
+            # Standard error of the growth if RX(pi) changed nothing, with the
+            # share of |1> pooled over both runs.
+            share = np.mean(labels == others[0])
+            error = np.sqrt(share * (1 - share) * (1 / n + 1 / (len(x) - n)))
+            if growth[others[0]] <= GROWTH_Z * error:
+                raise ValueError(
+                    f"RX(pi) does not grow the |1> cluster of qubit {q} "
+                    "significantly; the drive may miss the qubit."
+                )
         centers.append(c[[ground, *others]])
     return Discriminator(centers)
 
