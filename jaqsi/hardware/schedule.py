@@ -1,7 +1,7 @@
 """Pulse schedule of a circuit: what a hardware backend plays per wire."""
 
 from dataclasses import dataclass
-from typing import Any, Collection, Dict, List, Optional, Tuple, Union
+from typing import Any, Collection, List, Optional, Tuple, Union
 
 from jaqsi.evolution import PendingEvolution
 from jaqsi.gateset import Barrier
@@ -50,17 +50,17 @@ class Sync:
 
 @dataclass
 class Schedule:
-    """Ordered pulses per wire, followed by a readout.
+    """Ordered pulses and syncs, followed by a readout.
 
     Attributes:
         n_qubits: Number of qubits.
-        wires: Events and syncs per wire in play order.  A two-wire event or
-            a sync appears in the list of every wire it spans.
+        items: Events and syncs in circuit order, each once.  Restricted to
+            one wire, this is the wire's play order.
         measured: Wires read out at the end.
     """
 
     n_qubits: int
-    wires: Dict[int, List[Union[PulseEvent, Sync]]]
+    items: List[Union[PulseEvent, Sync]]
     measured: Tuple[int, ...]
 
 
@@ -89,7 +89,7 @@ def build_schedule(
     """
     from jaqsi.pulses import PulseInformation  # deferred: drawing imports this module
 
-    wires: Dict[int, List[Union[PulseEvent, Sync]]] = {q: [] for q in range(n_qubits)}
+    items: List[Union[PulseEvent, Sync]] = []
     pending = iter(events)
     for op in tape:
         if isinstance(op, Barrier):
@@ -115,9 +115,8 @@ def build_schedule(
             raise ValueError(
                 f"Gate {op.name!r} has no pulse; pass pulse=True to run it on hardware."
             )
-        for q in item.wires:
-            wires[q].append(item)
-    return Schedule(n_qubits, wires, tuple(range(n_qubits)))
+        items.append(item)
+    return Schedule(n_qubits, items, tuple(range(n_qubits)))
 
 
 def validate(schedule: Schedule, leaves: Collection[str]) -> None:
@@ -130,10 +129,9 @@ def validate(schedule: Schedule, leaves: Collection[str]) -> None:
     Raises:
         ValueError: If an event's gate is not in *leaves*.
     """
-    for items in schedule.wires.values():
-        for item in items:
-            if isinstance(item, PulseEvent) and item.gate not in leaves:
-                raise ValueError(
-                    f"Gate {item.gate!r} on wires {item.wires} is not supported; "
-                    f"supported leaves: {sorted(leaves)}."
-                )
+    for item in schedule.items:
+        if isinstance(item, PulseEvent) and item.gate not in leaves:
+            raise ValueError(
+                f"Gate {item.gate!r} on wires {item.wires} is not supported; "
+                f"supported leaves: {sorted(leaves)}."
+            )
