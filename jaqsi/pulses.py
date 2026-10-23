@@ -1164,6 +1164,67 @@ def _duration(pulse_params):
     return pulse_params[-1]
 
 
+# Leaf gate metadata of the recorded pulse events.
+# ``physical`` gates have an envelope; virtual gates (RZ, CZ) do not.
+LEAF_META = {
+    "RX": {"carrier_phase": 0.0, "physical": True},
+    "RY": {"carrier_phase": float(jnp.pi / 2), "physical": True},
+    "RZ": {"carrier_phase": 0.0, "physical": False},
+    "CZ": {"carrier_phase": 0.0, "physical": False},
+}
+
+
+def leaf_pulse_event(gate_name, w, wires, pulse_params=None, parent=None):
+    """Build the pulse event of a leaf gate (RX, RY, RZ, CZ).
+
+    Args:
+        gate_name: Name of the leaf gate.
+        w: Rotation angle.
+        wires: Qubit index or indices.
+        pulse_params: Pulse parameters of the gate, ``None`` for its defaults.
+        parent: Label of the enclosing composite gate.
+
+    Returns:
+        :class:`~jaqsi.hardware.schedule.PulseEvent` of the gate.
+
+    Raises:
+        ValueError: If *gate_name* is not a leaf gate.
+    """
+    from jaqsi.hardware.schedule import PulseEvent
+
+    meta = LEAF_META.get(gate_name)
+    if meta is None:
+        raise ValueError(f"Unknown pulse gate: {gate_name!r}")
+
+    wires_list = [wires] if isinstance(wires, int) else list(wires)
+    pp = PulseInformation.gate_by_name(gate_name).split_params(pulse_params)
+
+    if meta["physical"]:
+        info = PulseEnvelope.get(PulseInformation.get_envelope())
+        return PulseEvent(
+            gate=gate_name,
+            wires=wires_list,
+            envelope_fn=info["fn"],
+            envelope_params=jnp.array(pp[:-1]),
+            w=float(w),
+            duration=float(pp[-1]),
+            carrier_phase=meta["carrier_phase"],
+            parent=parent,
+            quadrature_fn=info.get("quadrature_fn"),
+        )
+    # Virtual gate (RZ, CZ) — no physical envelope
+    return PulseEvent(
+        gate=gate_name,
+        wires=wires_list,
+        envelope_fn=None,
+        envelope_params=jnp.ravel(jnp.asarray(pp)),
+        w=float(w) if not isinstance(w, list) else 0.0,
+        duration=1.0,
+        carrier_phase=0.0,
+        parent=parent,
+    )
+
+
 class PulseGates:
     """Pulse-level implementations of quantum gates.
 
@@ -1278,45 +1339,7 @@ class PulseGates:
         ptape = active_pulse_tape()
         if ptape is None:
             return
-
-        from jaqsi.drawing import LEAF_META
-        from jaqsi.hardware.schedule import PulseEvent
-
-        meta = LEAF_META.get(gate_name, {})
-        wires_list = [wires] if isinstance(wires, int) else list(wires)
-
-        if meta.get("physical", False):
-            info = PulseEnvelope.get(PulseInformation.get_envelope())
-            pp = PulseInformation.gate_by_name(gate_name).split_params(pulse_params)
-            env_p = pp[:-1]
-            dur = float(pp[-1])
-            ptape.append(
-                PulseEvent(
-                    gate=gate_name,
-                    wires=wires_list,
-                    envelope_fn=info["fn"],
-                    envelope_params=jnp.array(env_p),
-                    w=float(w),
-                    duration=dur,
-                    carrier_phase=meta["carrier_phase"],
-                    parent=parent,
-                    quadrature_fn=info.get("quadrature_fn"),
-                )
-            )
-        else:
-            pp = PulseInformation.gate_by_name(gate_name).split_params(pulse_params)
-            ptape.append(
-                PulseEvent(
-                    gate=gate_name,
-                    wires=wires_list,
-                    envelope_fn=None,
-                    envelope_params=jnp.ravel(jnp.asarray(pp)),
-                    w=float(w) if not isinstance(w, list) else 0.0,
-                    duration=1.0,
-                    carrier_phase=0.0,
-                    parent=parent,
-                )
-            )
+        ptape.append(leaf_pulse_event(gate_name, w, wires, pulse_params, parent))
 
     @staticmethod
     def Rot(

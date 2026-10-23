@@ -501,16 +501,6 @@ def draw_mpl(
     return fig, ax
 
 
-# Leaf gate metadata for pulse schedule drawing.
-# ``physical`` gates have an envelope; virtual gates (RZ, CZ) do not.
-LEAF_META = {
-    "RX": {"carrier_phase": 0.0, "physical": True},
-    "RY": {"carrier_phase": float(jnp.pi / 2), "physical": True},
-    "RZ": {"carrier_phase": 0.0, "physical": False},
-    "CZ": {"carrier_phase": 0.0, "physical": False},
-}
-
-
 def _resolve_wires_for_drawing(wire_fn, wires_list):
     """Resolve a ``wire_fn`` string to concrete wire(s) for drawing."""
     if wire_fn == "all":
@@ -545,7 +535,7 @@ def collect_pulse_events(
     Returns:
         Ordered list of :class:`PulseEvent` objects.
     """
-    from jaqsi.gates import PulseEnvelope, PulseInformation
+    from jaqsi.pulses import PulseInformation, leaf_pulse_event
 
     pp_obj = PulseInformation.gate_by_name(gate_name)
     if pp_obj is None:
@@ -556,43 +546,7 @@ def collect_pulse_events(
 
     # --- Leaf gate ---
     if pp_obj.is_leaf:
-        meta = LEAF_META.get(gate_name)
-        if meta is None:
-            raise ValueError(f"Unknown pulse gate: {gate_name!r}")
-
-        info = PulseEnvelope.get(PulseInformation.get_envelope())
-        pp = pp_obj.split_params(pulse_params)
-
-        if meta["physical"]:
-            env_p = pp[:-1]
-            dur = float(pp[-1])
-            return [
-                PulseEvent(
-                    gate=gate_name,
-                    wires=wires_list,
-                    envelope_fn=info["fn"],
-                    envelope_params=jnp.array(env_p),
-                    w=float(w),
-                    duration=dur,
-                    carrier_phase=meta["carrier_phase"],
-                    parent=parent_label,
-                    quadrature_fn=info.get("quadrature_fn"),
-                )
-            ]
-        else:
-            # Virtual gate (RZ, CZ) — no physical envelope
-            return [
-                PulseEvent(
-                    gate=gate_name,
-                    wires=wires_list,
-                    envelope_fn=None,
-                    envelope_params=jnp.ravel(jnp.asarray(pp)),
-                    w=float(w) if not isinstance(w, list) else 0.0,
-                    duration=1.0,
-                    carrier_phase=0.0,
-                    parent=parent_label,
-                )
-            ]
+        return [leaf_pulse_event(gate_name, w, wires_list, pulse_params, parent_label)]
 
     # --- Composite gate ---
     parts = pp_obj.split_params(pulse_params)

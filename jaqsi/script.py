@@ -10,7 +10,7 @@ from jaqsi.operations import Operation
 from jaqsi.noise import KrausChannel
 from jaqsi.tape import recording, pulse_recording
 from jaqsi.drawing import draw_text, draw_mpl, draw_tikz
-from jaqsi.hardware.backend import Backend, labels_to_result
+from jaqsi.hardware.backend import Backend, diagonals, labels_to_result
 from jaqsi.hardware.schedule import Schedule, build_schedule, validate
 from jaqsi.unitary import UnitaryGates
 from jaqsi.evolution import Evolution, scratch_bytes
@@ -388,13 +388,15 @@ class Script:
         """Run the circuit on *backend*, one schedule per batch sample.
 
         Arguments are as in :meth:`execute`.  The pulse angles are read as
-        floats, so this runs eagerly and loops over the batch axis in Python.
+        floats, so this runs eagerly: it builds the schedules in a Python loop
+        over the batch axis and hands them to :meth:`Backend.run_batch` at
+        once.
 
         Raises:
             ValueError: If *shots* is missing, *type* is neither ``"probs"``
                 nor ``"expval"``, *initial_state* is set, the arguments are
-                JAX tracers, *in_axes* does not match *args*, or the backend
-                cannot play the circuit.
+                JAX tracers, *in_axes* does not match *args*, an observable is
+                not diagonal, or the backend cannot play the circuit.
         """
         if shots is None:
             raise ValueError("A backend samples shots; pass shots=N.")
@@ -407,27 +409,31 @@ class Script:
                 "A backend runs eagerly; it cannot be traced by jit, grad or vmap."
             )
 
-        def run(sample_args: tuple) -> jnp.ndarray:
-            schedule = self._schedule(sample_args, kwargs, obs)
-            validate(schedule, backend.leaves)
-            labels = backend.run(schedule, shots)
-            return labels_to_result(labels, type, obs)[0]
-
         if in_axes is None:
-            return run(args)
-        if len(in_axes) != len(args):
+            samples = [args]
+        elif len(in_axes) != len(args):
             raise ValueError(
                 f"in_axes has {len(in_axes)} entries but args has {len(args)}. "
                 "Provide one in_axes entry per positional argument."
             )
-        samples = [
-            tuple(
-                a if ax is None else jax.lax.index_in_dim(a, i, ax, keepdims=False)
-                for a, ax in zip(args, in_axes)
-            )
-            for i in range(self._batch_size(args, in_axes))
+        else:
+            samples = [
+                tuple(
+                    a if ax is None else jax.lax.index_in_dim(a, i, ax, keepdims=False)
+                    for a, ax in zip(args, in_axes)
+                )
+                for i in range(self._batch_size(args, in_axes))
+            ]
+        schedules = [self._schedule(sample, kwargs, obs) for sample in samples]
+        for schedule in schedules:
+            validate(schedule, backend.leaves)
+        if type == "expval":
+            diagonals(obs, schedules[0].n_qubits)  # raises before the device runs
+        results = [
+            labels_to_result(labels, type, obs)[0]
+            for labels in backend.run_batch(schedules, shots)
         ]
-        return jnp.stack([run(sample) for sample in samples])
+        return results[0] if in_axes is None else jnp.stack(results)
 
     @staticmethod
     def _args_contain_tracer(args: tuple) -> bool:
