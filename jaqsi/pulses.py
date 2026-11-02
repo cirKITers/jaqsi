@@ -358,6 +358,11 @@ class PulseEnvelope:
         return A * (jnp.abs(t - t_c) <= width / 2)
 
     @staticmethod
+    def _square_amplitude(p, t, t_c):
+        """Square-pulse interior; the integration interval supplies its edges."""
+        return p[0]
+
+    @staticmethod
     def cosine(p, t, t_c):
         """Raised cosine envelope. ``p = [A, width]``."""
         A, width = p[0], p[1]
@@ -959,7 +964,7 @@ class PulseInformation:
         # Four functions: (RX_X, RX_Y, RY_X, RY_Y) — one per (gate, Pauli)
         # component of the proper interaction-picture drive Hamiltonian.
         rx_x, rx_y, ry_x, ry_y = PulseEnvelope.build_coeff_fns(
-            info["fn"],
+            PulseEnvelope._square_amplitude if name == "square" else info["fn"],
             PulseGates.omega_c,
             PulseGates.omega_q,
             rwa=cls._rwa,
@@ -1164,6 +1169,15 @@ def _duration(pulse_params):
     return pulse_params[-1]
 
 
+def _drive_interval(pulse_params, duration):
+    """Differentiate square-pulse edges through the integration endpoints."""
+    if PulseInformation.get_envelope() != "square":
+        return duration
+    xp = np if _is_concrete(pulse_params) else jnp
+    edge = xp.clip((duration - pulse_params[1]) / 2, 0, duration / 2)
+    return xp.stack([edge, duration - edge])
+
+
 # Leaf gate metadata of the recorded pulse events.
 # ``physical`` gates have an envelope; virtual gates (RZ, CZ) do not.
 LEAF_META = {
@@ -1206,8 +1220,8 @@ def leaf_pulse_event(gate_name, w, wires, pulse_params=None, parent=None):
             wires=wires_list,
             envelope_fn=info["fn"],
             envelope_params=jnp.array(pp[:-1]),
-            w=float(w),
-            duration=float(pp[-1]),
+            w=w,
+            duration=pp[-1],
             carrier_phase=meta["carrier_phase"],
             parent=parent,
             quadrature_fn=info.get("quadrature_fn"),
@@ -1218,7 +1232,7 @@ def leaf_pulse_event(gate_name, w, wires, pulse_params=None, parent=None):
         wires=wires_list,
         envelope_fn=None,
         envelope_params=jnp.ravel(jnp.asarray(pp)),
-        w=float(w) if not isinstance(w, list) else 0.0,
+        w=w if not isinstance(w, list) else 0.0,
         duration=1.0,
         carrier_phase=0.0,
         parent=parent,
@@ -1427,7 +1441,9 @@ class PulseGates:
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
         env_params = _pack_params(pulse_params, slice(None), w)
         # All terms share the same parameter array.
-        H_eff.evolve(name="RX")([env_params] * H_eff.n_terms, t)
+        H_eff.evolve(name="RX")(
+            [env_params] * H_eff.n_terms, _drive_interval(pulse_params, t)
+        )
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -1468,7 +1484,9 @@ class PulseGates:
         # RY calls.
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
         env_params = _pack_params(pulse_params, slice(None), w)
-        H_eff.evolve(name="RY")([env_params] * H_eff.n_terms, t)
+        H_eff.evolve(name="RY")(
+            [env_params] * H_eff.n_terms, _drive_interval(pulse_params, t)
+        )
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
