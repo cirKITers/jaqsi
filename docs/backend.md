@@ -1,176 +1,129 @@
 # Backends
 
-JAQSI supports simulation of circuits using backend devices.
-At the moment, a mock backend is available alongside preliminary support for [qiclib](#qicontroller).
-This file serves as a supplementary explanation for the concepts explained in [backend notebook](backend.ipynb).
+The [backend notebook](backend.ipynb) follows a circuit from pulse scheduling through readout and calibration to execution on a mock device or a QiController.
+This companion explains what its experiments reveal about quantum control and measurement.
 
-Let's start by creating a circuit with `pulse=True` for the gates (see documentation on [Pulses](pulses.md) in JAQSI).
+## Circuit to schedule
 
-```python
-def circuit(theta):
-    Gates.RX(theta, wires=0, pulse=True)
-    ...
-```
+`js.Script(circuit).schedule(...)` records gates created with `pulse=True` and decomposes composite gates into their pulse primitives.
+In the opening example, H becomes RZ followed by RY, while `Gates.Barrier` synchronizes the two wires.
+The current backends support RX, RY and virtual RZ, but not two-qubit pulses such as CZ.
 
-The pulse schedule of a script can be obtained through `js.Script(circuit).schedule(...)`.
-Note that the current backends only support RX, RY and virtual RZ for now (and of course any other gate that can be composed from these basis gates).
-Gates requiring a two-qubit pulse, such as CZ, are not supported yet.
-
-To execute the schedule on a backend, pass the device as `backend=...` when creating the `Script`.
-The backend returns one state label per shot and measured qubit, which `Script` turns into probabilities or expectation values.
-Naturally, the `shots` argument in `Script.execute` becomes mandatory now and only `expval` and `probs` execution modes are available.
-However, as we'll see a bit further down, the mock backend also supports differentiable outputs, meaning that training of a circuit is still possible.
+Wires advance independently between barriers.
+In the mock, a wire waiting at a barrier continues evolving under detuning and decay, while virtual RZ has zero duration.
+A final barrier is therefore needed to compare all qubits at a common time.
 
 ## Mock
 
-Before running a calibration on hardware, we want to check whether it can recover the correct settings from imperfect measurements.
-`Mock` provides a device whose physical properties are known, while the calibration routine sees only its readout.
-It uses JAQSI's [pulse solver](pulses.md#open_system_pulse_evolution) to evolve the qubits and then synthesizes IQ measurements, allowing for a differentiable simulation.
+`Mock` evolves the schedule with JAQSI's [pulse solver](pulses.md#open_system_pulse_evolution) and synthesizes IQ readout.
+It separates the programmed `QubitConfig` from the physical properties in `MockQubit`, so calibration can be tested against known device parameters using only measurements.
+The config sets the drive frequency and amplitude and time scales, while the physical model supplies the resonance, Rabi rate, T1/T2, thermal population and readout noise.
 
-To distinguish what we program from how the device behaves, the mock keeps two descriptions of each qubit:
+The notebook deliberately starts with a 60 MHz drive for a 63 MHz qubit and an amplitude scale of 0.1 instead of 0.08.
+The amplitude error alone would make a resonant pulse rotate 1.25 times too far, while detuning also changes its rotation axis.
+Correcting these errors is necessary for programmed gate angles to represent the intended operations.
+Here `time_scale` converts the recorded duration to seconds, while `amplitude_scale` converts the envelope to device amplitude.
+The physical `rabi_rate` then sets the angular rotation rate, so the product `rabi_rate * amplitude_scale * time_scale` must equal one to recover the nominal resonant rotation.
 
-| Object        | Meaning                                                                                              |
-| ------------- | ---------------------------------------------------------------------------------------------------- |
-| `QubitConfig` | Settings updated through calibration: drive frequency, amplitude and time scales, and readout/reset. |
-| `MockQubit`   | Physical properties: resonance, Rabi rate, T1/T2, thermal population and readout noise.              |
+### Readout
 
-For a resonant drive with one quadrature, the rotation angle depends on the area under its angular rotation rate $\Omega(t)$:
+`mock.iq` samples the final basis probabilities and draws a Gaussian IQ point around the selected class's center.
+Cluster populations carry information about the state, while their spread determines how reliably individual shots can be classified.
+An excited shot receives class 2 with probability `leakage`, and non-leaked shots can flip their binary label with `readout_error`.
 
-$$
-\theta_{\rm actual}=\int_{t_0}^{t_1}\Omega(t)\,dt.
-$$
+`calibrate_discriminator` combines a thermal preparation with one followed by RX($\pi$), then fits clusters and assigns new points to their nearest center.
+The cluster most populated by the thermal preparation is labelled 0, and the remaining cluster whose population grows most after RX($\pi$) is labelled 1.
+This requires a rough initial calibration that already excites the qubit noticeably.
+A third cluster is treated as leakage, although on hardware a separate readout cluster alone does not establish physical leakage.
 
-The programmed `amplitude_scale` converts the recorded envelope, including the gate's angle factor, to device amplitude.
-The physical `rabi_rate` then converts that amplitude to $\Omega(t)$ in radians per second.
-Similarly, `time_scale` converts a recorded duration to seconds.
-An incorrect amplitude scale therefore produces the wrong rotation even if the pulse shape is correct.
-If the programmed drive frequency also misses the physical resonance, the pulse is detuned by $\Delta=2\pi(f_{\rm qubit}-f_{\rm drive})$ in radians per second, which changes the rotation axis as well.
-This is why the notebook first finds the resonance with a frequency sweep and then corrects the amplitude scale with a Rabi sweep.
+### Frequency and Rabi sweeps
 
-### State preparation and evolution
+With a discriminator fitted, the notebook corrects the drive through two measurements.
+`frequency_sweep` plays RX($\pi$) across drive frequencies and writes the center of an empirical Gaussian fit into `drive_frequency`.
+Next, `rabi_sweep` fits the excited population to $c+a\sin^2(k\theta/2)$ and divides `amplitude_scale` by $k$.
+The offset $c$ and contrast $a$ accommodate imperfect populations, while $k$ measures the error in the rotation scale.
+Frequency comes first because detuning distorts the rotation being calibrated by the Rabi sweep.
 
-Notably, correcting the drive does not remove the device's interaction with its environment.
-The mock accounts for this both in state preparation and during evolution, i.e. if `thermal_population` is $p_{\rm th}$, each qubit starts in the mixture
+Both routines update `mock.qubits`, so subsequent circuits use the fitted settings.
+Comparing these with the known resonance and amplitude scale checks whether calibration recovers the device's controls despite imperfect preparation and readout.
 
-$$
-\rho_{\rm th}=(1-p_{\rm th})|0\rangle\langle0|
-             +p_{\rm th}|1\rangle\langle1|.
-$$
+### Thermal state and π pulse
 
-For $p_{\rm th}>0$, even an ideal RX($\pi$) pulse only swaps those populations, leaving $P_1=1-p_{\rm th}$ instead of a pure excited state.
-During the pulse, T1 additionally relaxes populations toward this thermal equilibrium, while T2 describes the loss of coherence between $|0\rangle$ and $|1\rangle$.
-The mock evolves these processes together with the drive and detuning using the Lindblad equation.
-We refer to our [noise guide](noise.md#relaxation_and_dephasing) for details on the decay laws and their collapse operators.
-The rates are constant, with `t1 > 0` and `0 < t2 <= 2*t1`.
-Setting both times to infinity removes decay.
-
-Because the rates act throughout the evolution, their effect depends on the physical duration and on the states visited during a pulse.
-A fresh call to `mock.probs` or `mock.density` prepares a fresh initial state and evolves the entire schedule with these same rates.
-Within that schedule, each gate receives the preceding gate's output, so errors can accumulate across the sequence which is shown in the following.
-
-To see this accumulation separately from drive miscalibration, consider repeated RX($\pi$) pulses starting in $|0\rangle$.
-Ideally, after $n$ pulses,
+Calibration corrects the drive but does not purify the initial state.
+For thermal excited population $p_{\rm th}$, an ideal RX($\pi$) swaps the populations and gives $P_1=1-p_{\rm th}$.
+The notebook uses $p_{\rm th}=0.15$, so even a perfect population swap reaches only 0.85 before readout errors.
+More generally, an ideal RX($\theta$) applied to this mixture gives
 
 $$
-P_1(n)=\sin^2\!\left(\frac{n\pi}{2}\right),
-\qquad t_{\rm total}=n\tau,
+\langle Z\rangle=(1-2p_{\rm th})\cos\theta.
 $$
 
-where $\tau$ is one pulse's duration.
-The population therefore alternates between zero and one, while the time spent evolving increases with every gate.
-The notebook compares the same device with and without decay, omitting classical drive noise for this experiment.
-It also starts in $|0\rangle$ and shortens T1/T2 from 50 microseconds to 80/60 nanoseconds to make their effect visible within roughly 35 ns pulses.
-These choices isolate decay during evolution from reduced contrast caused by thermal preparation.
+The reduced contrast therefore need not indicate an incorrect rotation angle.
+It can come from preparation alone, which is why the notebook compares both pure and thermal initial states.
 
-![Population after consecutive RX gates](figures/backend_gate_sequence_light.png#center#only-light)
-![Population after consecutive RX gates](figures/backend_gate_sequence_dark.png#center#only-dark)
+In the IQ plot, the calibrated pulse moves most shots into the excited cluster without removing the cluster spread.
+The dotted lines are nearest-center classification boundaries, while the dashed line is the binary boundary produced by `export` for the controller's state estimation.
 
-With finite T1/T2, the separation between odd and even gate counts shrinks as the sequence grows.
-As the drive keeps supplying excitation, the population approaches a repeated-pulse steady cycle.
+### Running circuits
 
-The same timing model also applies when wires wait for each other.
-At a barrier, a wire that finishes early continues evolving with detuning and decay until the others arrive.
-Virtual RZ gates have zero modeled duration.
-Since wires otherwise finish at their own times, a final `Gates.Barrier` is needed when all qubits should be observed at a common time.
+Pass the device to `js.Script(circuit, backend=mock)` and supply `shots` to `execute`.
+Backends return `probs` or `expval`, with expectation values restricted to observables diagonal in the computational basis, such as Pauli Z.
+
+The notebook varies the Gaussian pulse's amplitude and duration separately.
+For a resonant single-quadrature drive, the rotation depends on the pulse area, so scaling amplitude scales the rotation angle.
+Changing duration at fixed width changes the lifted Gaussian's shape and area nonlinearly, explaining why the two sweeps differ.
+The thermal-start simulation uses `BitFlip(p_th)` before the pulse to reproduce the mock's initial mixture and the resulting reduction in $\langle Z\rangle$ contrast.
+
+Measured values also include finite-shot and classification effects.
+`labels_to_result` discards any shot labelled as leakage on a measured wire and normalizes over the retained shots, so its probabilities are conditional on that selection.
+It returns the excluded fraction separately, whereas `Script.execute` returns only the probabilities or expectation values.
+Because leakage is sampled only from excited shots in this model, excluding it can shift the population estimate as well as reduce the sample count.
+
+### Accumulation over consecutive gates
+
+The next experiment starts in $|0\rangle$ and compares repeated RX($\pi$) pulses with finite and infinite T1/T2, without classical drive noise.
+Ideally, $P_1$ alternates between zero and one as the gate count increases.
+With decay, this contrast decreases because every gate receives the preceding gate's state and the total evolution time grows with circuit depth.
+
+The executable cell uses T1 = 500 ns and T2 = 100 ns to make this visible over a short sequence.
+T1 relaxes populations toward thermal equilibrium, while T2 describes coherence loss during the rotations.
+The mock evolves these processes together with the drive using the Lindblad equation.
+Even though each pulse has the same duration and decay rates, its effect depends on the incoming state, so later points cannot be obtained by repeating independent single-gate measurements.
+This shows why calibrating an isolated gate does not eliminate errors accumulated during a longer computation.
+See [relaxation and dephasing](noise.md#relaxation_and_dephasing) for the model.
 
 ### Drive noise and gradients
 
-T1/T2 describes relaxation and dephasing, but the control signal itself can also fluctuate.
-To study how a pulse responds to those fluctuations, `DriveNoise` supplies one realization of amplitude and phase noise over the complete schedule.
-Writing the nominal quadratures as $\Omega(t)=\Omega_I(t)+i\Omega_Q(t)$, the mock applies
+The final mock experiment disables thermal preparation and T1/T2 decay to isolate classical drive fluctuations.
+`DriveNoise` specifies fractional `amplitude` changes and `phase` offsets in radians on a `times` grid measured in seconds from the circuit's start.
+The two noise arrays have shape `(n_qubits, len(times))`, with linear interpolation between samples and constant values outside the grid.
+For the complex drive $\Omega=\Omega_I+i\Omega_Q$, the applied signal is
 
 $$
 \Omega_{\rm noisy}(t)=[1+\epsilon_A(t)]e^{i\epsilon_\phi(t)}\Omega(t).
 $$
 
-Thus `amplitude` stores the fractional fluctuation $\epsilon_A$, while `phase` stores $\epsilon_\phi$ in radians.
-For example, an amplitude value of `0.1` makes the drive ten percent stronger at that time.
-The two arrays then have shape `(n_qubits, len(times))` where each row belongs to a wire and each column to a supplied time, measured in seconds from the start of the circuit.
+Thus amplitude noise changes the drive strength, while phase noise rotates its axis in the quadrature plane.
 
-The trace contains values only at those discrete times, whereas the pulse solver needs a drive value whenever it evaluates the evolution between them.
-Linear interpolation defines those missing values as between amplitude offsets of `0.0` and `0.1`, the offset halfway through is `0.05`.
-Before the first sample and after the last, the nearest endpoint value is retained.
-A single sample therefore models a constant offset throughout the run.
-The solver splits integration at the sample times so it can resolve short features in the supplied trace.
+The notebook sweeps the RX angle at fixed pulse duration and reuses the same noise trace throughout.
+`mock.probs` and `mock.density` return exact pre-readout results and support `jax.grad`, `jit` and `vmap` without shots or a discriminator.
+This differentiable interface is separate from sampled backend execution through `Script.execute`.
+In particular, changing the angle here changes the control amplitude without increasing elapsed time, unlike the preceding gate-count experiment.
 
-For pulse optimization, we want to know how these dynamics change an objective when we change a control.
-Calling `mock.density(...)` returns the final density matrix $\rho$ before readout, and `mock.probs(...)` returns its diagonal.
-For one qubit, $P_1=\langle1|\rho|1\rangle$ is its excited-state probability.
-These exact outputs include the modeled physical noise without drawing measurement shots, which makes them suitable for differentiation with `jax.grad`.
-A pure `initial_state` can also be passed to `density` when a probe state should replace thermal preparation.
+The plot pairs $\langle Z\rangle$ with its control derivative.
+For excited-state preparation, the loss is $L=1-P_1=(1+\langle Z\rangle)/2$, so half the plotted derivative gives the direction and sensitivity needed to adjust the pulse angle.
+For robustness across noise realizations, average losses over complete runs while preserving each trace's time correlations, as described in [training with noisy evolution](training.md#training_with_noisy_evolution).
 
-The notebook illustrates this with a single pulse whose programmed RX angle $\theta$ scales its amplitude while its duration stays fixed.
-For one qubit, $\langle Z\rangle=P_0-P_1=1-2P_1$, so an ideal, calibrated RX starting in $|0\rangle$ gives $\langle Z\rangle=\cos\theta$.
-The plot overlays the noisy expectation value on the left axis and its gradient $\partial\langle Z\rangle/\partial\theta$ on the right, using the same noise realization throughout the sweep.
-If the goal is excited-state preparation, the loss $L=1-P_1=(1+\langle Z\rangle)/2$ has derivative $\tfrac12\partial\langle Z\rangle/\partial\theta$, so the gradient indicates how to adjust the control.
-This amplitude sweep holds elapsed time fixed, unlike the preceding gate-count experiment.
+The mock models local two-level dynamics and synthetic readout labels.
+It does not simulate qubit couplings, physical population of higher levels, reset transients or readout dynamics, so `reset_time` and readout settings do not change its state evolution.
 
-![Noisy pulse Z expectation and its control gradient](figures/backend_pulse_noise_light.png#center#only-light)
-![Noisy pulse Z expectation and its control gradient](figures/backend_pulse_noise_dark.png#center#only-dark)
+## QiController
 
-Although every point has the same duration, the state follows a different path at each amplitude.
-With no drive, $|0\rangle$ remains unchanged in this example as during a nominal $2\pi$ rotation, it passes through excited states and superpositions, where relaxation and dephasing can prevent a perfect return.
-Consequently, fixed decay rates can change both peaks and minima without any population leaving the two-level system.
+With the `jaqsi[qiclib]` extra installed, `QiclibBackend` translates the same schedules into controller jobs.
+The notebook first builds `job(schedule)` with no connected controller, exposing the reset, pulse, synchronization, frame-rotation and readout commands for inspection.
+Each wire needs its own qubit config.
 
-For that derivative to compare the same experiment at nearby controls, keep the sequence and noise realization fixed.
-To optimize performance over many realizations, use `jax.vmap` over complete circuit runs and average their losses.
-Using absolute time across each run preserves fluctuations shared by consecutive gates or different wires while averaging independently at each gate would discard those correlations.
-The [noise guide](noise.md#classical_drive_noise) discusses this distinction, while [training](training.md#training_with_noisy_evolution) explains objectives beyond state preparation.
-
-### Readout and calibration
-
-Exact probabilities let us examine the simulated state directly, but a device experiment must infer populations from repeated measurements.
-The notebook therefore also exercises a readout path as `mock.iq(schedule, shots=N)` samples the basis probabilities and produces one pair of quadratures $(I,Q)$ per shot and measured qubit.
-After selecting a readout class $s$, its IQ point follows as
-
-$$
-\mathbf r\mid s\sim\mathcal N(\boldsymbol\mu_s,\sigma^2 I_2),
-\qquad \mathbf r=(I,Q),
-$$
-
-where $\boldsymbol\mu_s$ is the corresponding `iq_centers` entry, $\sigma$ is `noise_width` and $I_2$ is the two-dimensional identity matrix.
-Repeated shots consequently form clusters, whose separation determines how reliably the readout classes can be distinguished.
-Before drawing the IQ point, an excited shot can receive class 2 with probability `leakage`, and non-leaked shots can flip their binary class with `readout_error`.
-
-The cluster centers are known inside the mock, but a calibration routine must estimate them from data.
-`calibrate_discriminator` therefore measures both a thermal preparation and a preparation followed by RX($\pi$).
-The first mainly populates the ground-state cluster, while the second increases the excited-state cluster's population and makes it identifiable.
-Fitting both datasets gives a discriminator that assigns new IQ points to their nearest center.
-
-![Synthetic IQ readout before and after a pi pulse](figures/backend_readout_light.png#center#only-light)
-![Synthetic IQ readout before and after a pi pulse](figures/backend_readout_dark.png#center#only-dark)
-
-In this figure, the change in cluster populations shows the effect of the pulse while their spread comes from the IQ noise.
-The dotted lines mark the fitted classifier's boundaries, while the dashed line is the binary boundary exported for the controller's state estimation.
-With this discriminator fitted, `mock.run(...)` returns state labels, and frequency and Rabi sweeps can estimate populations from those labels to correct the drive settings.
-This connects readout calibration to the drive calibration introduced above.
-
-The sampled result is not always the same quantity as the exact probability.
-`labels_to_result` excludes shots with a leakage label on any wire, so its probabilities are conditional on the retained shots as it returns the excluded fraction as well.
-`Script.execute` returns only the resulting probabilities or expectation values.
-To inspect leakage, use `run` and `labels_to_result` directly, as in the notebook.
-If a `drive_noise` trace is passed to `iq` or `run`, that one realization is shared by all shots in the call.
-
-This sampled path tests the effects of finite shots and classification errors, whereas the exact path provides pulse-control gradients without differentiating through random draws or discrete labels.
-Both use the same local two-level evolution.
-The current mock does not simulate qubit couplings, reset transients, the readout pulse or measurement backaction, so readout settings and `reset_time` do not alter that evolution. Studying physical leakage suppression by DRAG would also require population dynamics in additional levels.
+On a connected device, the same discriminator calibration and frequency and Rabi sweeps operate on measured IQ data.
+`write_state_config` loads the exported binary classifier for optional active reset, which measures the qubit and conditionally applies RX($\pi$).
+The notebook leaves device execution disabled by default.
+This shared workflow lets the mock exercise calibration and analysis before applying them to hardware.
