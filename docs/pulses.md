@@ -6,12 +6,12 @@ JAQSI can run pulse simulation on a GPU, but each pulse requires an ODE solve. F
 
 The best device choice depends on both circuit width and the number of solves. Small circuits with few pulses may run best on the CPU. As circuits grow, GPU gate operations become more useful; with many pulse solves per call, keeping the solves on the GPU may also help. Benchmark the options for your workload.
 
-RX, RY, RZ, and CZ form the fundamental pulse gate set. Other gates are decomposed into these gates, as shown below:
+RX, RY, RZ, and CZ form the basis gate set. Other gates are decomposed into these gates, as shown below:
 
 ![Dependency Graph](figures/pulse_gates_dependencies_light.png#center#only-light)
 ![Dependency Graph](figures/pulse_gates_dependencies_dark.png#center#only-dark)
 
-Read the graph from the bottom up: the fundamental gates sit at the bottom, and each edge weight counts the child gates used in a decomposition.
+Read the graph from the bottom up: the basis gates sit at the bottom, and each edge weight counts the child gates used in a decomposition.
 
 Pulse gates use the same `Gates` entry point as unitary gates. Add `pulse=True` to an individual call:
 
@@ -96,14 +96,14 @@ For $\sigma \gg T$, it tends to the parabola $4 A t (T - t) / T^2$.
 With parameters $[A, \beta, \sigma]$, the in-phase envelope $E(t)$ is the lifted Gaussian above, and the quadrature envelope is its derivative $Q(t) = -\beta \dot{E}(t)$, where $\beta$ takes the place of the inverse anharmonicity $1/\Delta$ in Eq. (9) of Motzoi et al. (see also [Gambetta et al. (2011)](https://doi.org/10.1103/PhysRevA.83.012308)).
 While $E$ vanishes at the pulse edges, $\dot{E}$ does not, so $Q$ starts and ends with a step.
 Qiskit's [`Drag`](https://quantum.cloud.ibm.com/docs/api/qiskit/1.4/qiskit.pulse.library.Drag) instead takes its quadrature proportional to $\beta\,(t - T/2)\,E(t) / \sigma^2$, which vanishes at the edges but is not the derivative of the lifted $E$.
-Under the RWA, `RX(w)` then evolves under $\frac{w}{2}\left(E X + Q Y\right)$ and `RY(w)` under $\frac{w}{2}\left(E Y - Q X\right)$.
+Under the rotating wave approximation (RWA), `RX(w)` then evolves under $\frac{w}{2}\left(E X + Q Y\right)$ and `RY(w)` under $\frac{w}{2}\left(E Y - Q X\right)$.
 Note that jaqsi models qubits as two-level systems, so there is no leakage level for the quadrature to suppress.
 As $E$ is symmetric around $T/2$, $Q$ is odd around it and adds no net area, but it does not commute with the in-phase drive and adds an error about the $Z$ axis whose angle grows as $\beta w^2$, the second term of the [Magnus expansion](https://doi.org/10.1016/j.physrep.2008.11.001).
 Under the RWA, the Gaussian alone already implements the target rotation, which is why the calibrated defaults have $\beta \approx 0$ (below $10^{-12}$) and `drag` then reproduces `gaussian`.
 
 For backward compatibility, `drag_legacy` restores the pulse model of `drag` up to jaqsi 2a9132f, to reproduce results obtained with those versions.
 
-Pulse gates integrate a time-dependent Hamiltonian. Configure the solver with `Evolution.set_solver_defaults`; available solvers are `"dopri8"` (default), `"dopri5"`, `"magnus2"`, and `"magnus4"`:
+Unitary pulse gates integrate a time-dependent Hamiltonian. Configure the solver with `Evolution.set_solver_defaults`; available solvers are `"dopri8"` (default), `"dopri5"`, `"magnus2"`, and `"magnus4"`:
 
 ```python
 from jaqsi import Evolution
@@ -124,6 +124,80 @@ This matters for gradients of expectation values, which are computed with the ad
 The resulting error grows linearly with the number of pulse gates, so for circuits with thousands of them prefer a Magnus solver.
 
 Pulse gates are solved lazily when the circuit runs, rather than when they are recorded. Gates with the same pulse shape share one batched solve, while gates with identical parameters, such as repeated fixed-angle rotations, are solved only once. This avoids compiling a separate solver for each gate.
+
+## Open system pulse evolution
+
+`Hamiltonian.evolve(collapse_ops=[C, ...])` includes relaxation and dephasing during a pulse by solving the [Lindblad master equation](noise.md#noise_during_a_pulse).
+It records a quantum channel, which `Script` combines with unitary gates and other channels in a density-matrix circuit.
+This works independently of a device backend.
+
+The following example prepares an excited state with $H(t)=p_0\sin^2(\pi t)X/2$ over one time unit, while $C=\sqrt{0.2}|0\rangle\langle1|$ gives a relaxation time of five units.
+Without decay, the rotation angle would be $p_0/2$.
+With decay, differentiating the preparation loss $L=1-P_1$ shows how changing the drive amplitude affects the final population.
+
+```python
+import jax
+import jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)
+
+from jaqsi import Hamiltonian, Script
+
+X = jnp.array([[0, 1], [1, 0]], dtype=complex)
+C = jnp.sqrt(0.2) * jnp.array([[0, 1], [0, 0]], dtype=complex)
+H = (lambda p, t: p[0] * jnp.sin(jnp.pi * t) ** 2) * Hamiltonian(X / 2)
+evolve = H.evolve(collapse_ops=[C], solver="dopri8")
+circuit = Script(lambda p: evolve([p], 1.0))
+
+
+def loss(p):
+    return 1 - circuit.execute("probs", args=(p,))[1]
+
+
+value, gradient = jax.jit(jax.value_and_grad(loss))(jnp.array([2.0]))
+```
+
+Here `[p]` supplies the coefficient's parameter array, and `1.0` specifies the duration.
+Collapse matrices are constant, include square-root rates and act on the Hamiltonian's wires.
+Hamiltonian coefficients, decay rates and integration intervals must use consistent time units.
+
+Omitting `collapse_ops` or passing `None` selects unitary evolution, while an empty list selects a channel with no dissipation.
+For a static Hamiltonian, the returned factory accepts a duration and an optional `wires` override.
+For a parametrized Hamiltonian, it accepts `(coefficient_parameters, time_interval)`, with either a duration or `[start, end]` as the interval.
+Lindblad evolution requires finite endpoints and nonnegative elapsed time, and supports `dopri8` and `dopri5`.
+
+### Local propagators
+
+The solver computes a channel's action on any incoming state, including one entangled with other wires.
+For a flattened density matrix, this gives
+
+$$
+\operatorname{vec}_r\rho(t)=\mathcal E(t,t_0)\operatorname{vec}_r\rho(t_0),
+\qquad
+\dot{\mathcal E}=\mathcal L(t)\mathcal E,
+\qquad \mathcal E(t_0,t_0)=I_{d^2},
+$$
+
+where $\operatorname{vec}_r$ denotes row-major flattening and $\mathcal L$ is the Lindblad generator.
+The result is exposed as `.superoperator`, not a unitary `.matrix`, and shares the deferred solving and batching used by pulse gates.
+A one-qubit channel is a $4\times4$ matrix, but storage grows as $d^4$ for a subsystem of dimension $d$.
+
+### Pulse boundaries and accuracy
+
+Width and duration gradients must include changes to the pulse's time boundaries.
+For a square pulse of amplitude $A$ and width $w$, the area is $Aw$, but differentiating a Boolean mask at fixed times misses the width derivative $A$.
+Built-in square RX/RY pulses therefore express the plateau through integration endpoints, while the mock also evolves drift and decay during surrounding idle intervals.
+Custom discontinuous envelopes need equivalent boundary treatment.
+
+The numerical channel should converge toward a trace-preserving, completely positive map as solver tolerances tighten.
+Check trace, Hermiticity and positivity errors without hiding them through clipping or renormalization, and check [gradient convergence](training.md#checking_a_control_gradient) separately.
+
+Tests cover analytic decay, constant-generator solutions, the unitary limit, entangled inputs and control gradients.
+An optional comparison with [Dynamiqs](https://www.dynamiqs.org/stable/python_api/integrators/mepropagator.html) checks states and gradients against an independent solver.
+
+```sh
+uv run --isolated --with dynamiqs pytest -q tests/test_lindblad_reference.py
+```
 
 ## Quantum Optimal Control
 
