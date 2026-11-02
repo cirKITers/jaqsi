@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Collection, List, Optional, Tuple, Union
 
-from jaqsi.evolution import PendingEvolution
+from jaqsi.evolution import PendingEvolution, PendingLindblad
 from jaqsi.gateset import Barrier
 from jaqsi.noise import KrausChannel
 from jaqsi.operations import Operation
@@ -109,7 +109,7 @@ def build_schedule(
             item = next(pending, None)
             if item is None or item.gate != op.name:
                 raise ValueError(f"No pulse event recorded for {op.name!r}.")
-        elif isinstance(op, KrausChannel):
+        elif isinstance(op, (KrausChannel, PendingLindblad)):
             raise ValueError(f"Noise channel {op.name!r} cannot run on hardware.")
         else:
             raise ValueError(
