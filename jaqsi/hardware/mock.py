@@ -1,16 +1,18 @@
 """Simulated device: jaqsi replays the schedule and IQ readout is synthesized."""
 
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, List, NamedTuple, Optional
 
 import jax.numpy as jnp
 import numpy as np
+import equinox as eqx
 
 from jaqsi.gates import Gates, PulseGates
+from jaqsi.pulses import PulseEnvelope
 from jaqsi.hardware.backend import Backend, QubitConfig
 from jaqsi.hardware.discriminator import Discriminator
-from jaqsi.hardware.schedule import PulseEvent, Schedule, validate
-from jaqsi.noise import BitFlip, ThermalRelaxationError
+from jaqsi.hardware.schedule import PulseEvent, Schedule, Sync, validate
+from jaqsi.noise import BitFlip
 from jaqsi.operations import Hamiltonian
 from jaqsi.script import Script
 
@@ -53,6 +55,28 @@ class MockQubit:
     thermal_population: float = 0.0
     readout_error: float = 0.0
     leakage: float = 0.0
+
+    def __post_init__(self):
+        if not (self.t1 > 0 and self.t2 > 0 and self.t2 <= 2 * self.t1):
+            raise ValueError("Require t1 > 0 and 0 < t2 <= 2*t1.")
+        if not 0 <= self.thermal_population <= 1:
+            raise ValueError("thermal_population must be in [0, 1].")
+
+
+class DriveNoise(NamedTuple):
+    """One classical noise realization over the complete schedule.
+
+    ``times`` is an increasing physical-time grid in seconds. ``amplitude``
+    and ``phase`` have shape ``(n_qubits, len(times))`` and hold fractional
+    amplitude noise and phase noise in radians. Linear interpolation is used,
+    with constant endpoint values outside the grid. A one-point grid represents
+    quasistatic noise. Generate traces before solving; batch complete circuit
+    results to average an ensemble without discarding temporal correlations.
+    """
+
+    times: jnp.ndarray
+    amplitude: jnp.ndarray
+    phase: jnp.ndarray
 
 
 class Mock(Backend):
@@ -102,43 +126,92 @@ class Mock(Backend):
         self.rng = np.random.default_rng(seed)
         self.discriminator: Optional[Discriminator] = None
 
-    def _replay(self, schedule: Schedule) -> None:
-        """Apply the schedule's pulses with thermal relaxation, wire by wire.
+    def _replay(
+        self, schedule: Schedule, drive_noise: DriveNoise, prepare: bool
+    ) -> None:
+        """Record shared Lindblad evolutions on each wire's physical timeline."""
+        clocks = [jnp.asarray(0.0) for _ in range(schedule.n_qubits)]
+        if prepare:
+            for q in range(schedule.n_qubits):
+                BitFlip(self.truth[q].thermal_population, wires=q)
+        for ev in schedule.items:
+            if isinstance(ev, Sync):
+                end = jnp.max(jnp.stack([clocks[q] for q in ev.wires]))
+                for q in ev.wires:
+                    config, true = self.qubits[q], self.truth[q]
+                    detuning = 2 * np.pi * (true.frequency - config.drive_frequency)
+                    H = Hamiltonian(detuning * config.time_scale / 2 * PulseGates.Z, q)
+                    H.evolve(collapse_ops=_collapse_ops(true, config.time_scale))(
+                        (end - clocks[q]) / config.time_scale, wires=q
+                    )
+                    clocks[q] = end
+                continue
+            q = ev.wires[0]
+            if ev.gate == "RZ":
+                Gates.RZ(2 * ev.envelope_params[0] * ev.w, wires=q)
+                continue
+            _drive(ev, self.qubits[q], self.truth[q], clocks[q], drive_noise)
+            clocks[q] = clocks[q] + ev.duration * self.qubits[q].time_scale
 
-        All leaves are single-qubit gates, so the wires commute.
+    def density(
+        self,
+        schedule: Schedule,
+        *,
+        drive_noise: Optional[DriveNoise] = None,
+        initial_state: Optional[jnp.ndarray] = None,
+    ) -> jnp.ndarray:
+        """Exact density matrix, differentiable in the schedule's pulse controls.
+
+        Args:
+            schedule: Fixed sequence of pulses and syncs, with JAX-valued controls.
+            drive_noise: A fixed classical noise realization; ``None`` disables it.
+            initial_state: Optional pure statevector, replacing thermal preparation.
+
+        Each wire is measured when its own stream finishes, as on the backend.
+        Add a final sync to evolve all wires to a common readout time. The mock
+        supports independent local dynamics, including shared classical noise;
+        it does not model couplings, readout dynamics or physical leakage.
         """
+        validate(schedule, self.leaves)
+        n = schedule.n_qubits
+        if len(self.qubits) < n or len(self.truth) < n:
+            raise ValueError(
+                "The mock needs a config and physical qubit for every wire."
+            )
+        if drive_noise is None:
+            drive_noise = DriveNoise(jnp.zeros(1), jnp.zeros((n, 1)), jnp.zeros((n, 1)))
+        if (
+            drive_noise.times.ndim != 1
+            or drive_noise.times.size == 0
+            or drive_noise.amplitude.shape != (n, drive_noise.times.size)
+            or drive_noise.phase.shape != drive_noise.amplitude.shape
+        ):
+            raise ValueError(
+                "Noise needs times (m,) and amplitude/phase (n_qubits, m)."
+            )
+        times = eqx.error_if(
+            drive_noise.times,
+            jnp.any(~jnp.isfinite(drive_noise.times))
+            | jnp.any(jnp.diff(drive_noise.times) <= 0),
+            "Noise times must be finite and strictly increasing.",
+        )
+        drive_noise = drive_noise._replace(times=times)
         for q in range(schedule.n_qubits):
-            programmed, true = self.qubits[q], self.truth[q]
-            # The device plays amplitude_scale·w·E, which rotates the qubit at
-            # rabi_rate times that per second: ratio times jaqsi's w·E per
-            # jaqsi time unit of time_scale seconds.
-            ratio = true.rabi_rate * programmed.amplitude_scale * programmed.time_scale
-            # Qubit minus drive frequency, in radians per jaqsi time unit.
-            offset = true.frequency - programmed.drive_frequency
-            detuning = 2 * np.pi * offset * programmed.time_scale
-            BitFlip(true.thermal_population, wires=q)  # |0> -> thermal state
-            # Not modeled: relaxation and precession of a qubit idling at a Sync.
-            for ev in schedule.items:
-                if not isinstance(ev, PulseEvent) or q not in ev.wires:
-                    continue
-                if ev.gate == "RZ":
-                    # A virtual Z is a frame change and takes no time.
-                    Gates.RZ(ev.w, wires=q, pulse=True, pulse_params=ev.envelope_params)
-                    continue
-                _drive(ev, ratio, detuning)
-                ThermalRelaxationError(
-                    true.thermal_population,
-                    true.t1,
-                    true.t2,
-                    ev.duration * programmed.time_scale,
-                    wires=q,
-                )
+            if not self.qubits[q].time_scale > 0:
+                raise ValueError("time_scale must be positive.")
+        script = Script(
+            lambda: self._replay(schedule, drive_noise, initial_state is None), n
+        )
+        return script.execute("density", initial_state=initial_state)
 
-    def probs(self, schedule: Schedule) -> jnp.ndarray:
+    def probs(
+        self, schedule: Schedule, *, drive_noise: Optional[DriveNoise] = None
+    ) -> jnp.ndarray:
         """Exact probabilities of the computational basis states before readout.
 
         Args:
             schedule: Schedule to replay.
+            drive_noise: A fixed classical noise realization; ``None`` disables it.
 
         Returns:
             Probabilities of shape ``(2**n_qubits,)``, qubit 0 the most
@@ -147,22 +220,31 @@ class Mock(Backend):
         Raises:
             ValueError: If the schedule holds a gate other than the leaves.
         """
-        validate(schedule, self.leaves)  # the replay plays single-qubit leaves
-        script = Script(lambda: self._replay(schedule), schedule.n_qubits)
-        return script.execute("probs")
+        return jnp.real(jnp.diag(self.density(schedule, drive_noise=drive_noise)))
 
-    def iq(self, schedule: Schedule, shots: int) -> np.ndarray:
+    def iq(
+        self,
+        schedule: Schedule,
+        shots: int,
+        *,
+        drive_noise: Optional[DriveNoise] = None,
+    ) -> np.ndarray:
         """Play *schedule* for *shots* shots and record the raw IQ points.
 
         Args:
             schedule: Schedule to play.
             shots: Number of shots.
+            drive_noise: Fixed noise realization shared by these shots.
 
         Returns:
             IQ points of shape ``(len(schedule.measured), 2, shots)``.
         """
         n = schedule.n_qubits
-        probs = np.clip(np.asarray(self.probs(schedule), dtype=float), 0, None)
+        probs = np.clip(
+            np.asarray(self.probs(schedule, drive_noise=drive_noise), dtype=float),
+            0,
+            None,
+        )
         index = self.rng.choice(2**n, size=shots, p=probs / probs.sum())
         points = []
         for q in schedule.measured:
@@ -175,7 +257,13 @@ class Mock(Backend):
             points.append(qubit.iq_centers[state].T + noise)
         return np.stack(points)
 
-    def run(self, schedule: Schedule, shots: int) -> np.ndarray:
+    def run(
+        self,
+        schedule: Schedule,
+        shots: int,
+        *,
+        drive_noise: Optional[DriveNoise] = None,
+    ) -> np.ndarray:
         """Play *schedule* for *shots* shots and classify each IQ point.
 
         Raises:
@@ -186,49 +274,99 @@ class Mock(Backend):
                 "The mock has no discriminator; fit one with "
                 "calibrate_discriminator or assign one to Mock.discriminator."
             )
-        return self.discriminator.labels(self.iq(schedule, shots))
+        return self.discriminator.labels(
+            self.iq(schedule, shots, drive_noise=drive_noise)
+        )
 
 
-def _drive(ev: PulseEvent, ratio: float, detuning: float) -> None:
-    """Evolve an RX or RY pulse in the frame of the drive.
+def _collapse_ops(true: MockQubit, time_scale: float) -> list:
+    """Thermal relaxation and pure dephasing in dimensionless pulse time."""
+    down = np.array([[0, 1], [0, 0]], dtype=complex)
+    gamma1 = time_scale / true.t1
+    gamma_phi = time_scale / true.t2 - gamma1 / 2
+    return [
+        np.sqrt((1 - true.thermal_population) * gamma1) * down,
+        np.sqrt(true.thermal_population * gamma1) * down.T,
+        np.sqrt(gamma_phi / 2) * PulseGates.Z,
+    ]
 
-    In the frame that rotates with the drive at ``ω_d``, the RWA leaves
 
-        H(t) = r·w/2 · [(E cos φ − Q sin φ)·X + (E sin φ + Q cos φ)·Y] + Δ/2 · Z
-
-    with the event's envelope ``E``, quadrature ``Q``, angle ``w`` and
-    carrier phase ``φ``.  With ``r = 1`` and ``Δ = 0`` this is the RWA of
-    :meth:`~jaqsi.pulses.PulseEnvelope.build_coeff_fns`, jaqsi's RX for
-    ``φ = 0`` and RY for ``φ = π/2``.  jaqsi's qubit Hamiltonian is
-    ``ω_q/2 · Z``, so the drive frame leaves ``(ω_q − ω_d)/2 · Z``:
-    ``Δ = ω_q − ω_d`` is positive for a drive below the qubit's resonance.
-
-    Args:
-        ev: RX or RY event.
-        ratio: Amplitude ratio ``r`` of the device's drive to jaqsi's, the
-            qubit's Rabi rate times the programmed amplitude and time scale.
-        detuning: ``Δ`` in radians per jaqsi time unit.
-    """
+def _drive(
+    ev: PulseEvent,
+    config: QubitConfig,
+    true: MockQubit,
+    start: jnp.ndarray,
+    noise: DriveNoise,
+) -> None:
+    """Record simultaneous drive and dissipation, including moving square edges."""
+    ratio = true.rabi_rate * config.amplitude_scale * config.time_scale
+    detuning = 2 * np.pi * (true.frequency - config.drive_frequency) * config.time_scale
     X, Y, Z = PulseGates.X, PulseGates.Y, PulseGates.Z
-    phi = ev.carrier_phase
-    in_phase = ratio / 2 * (np.cos(phi) * X + np.sin(phi) * Y)
-    H = _envelope(ev.envelope_fn) * Hamiltonian(in_phase, ev.wires)
-    H = H + _static * Hamiltonian(detuning / 2 * Z, ev.wires)
-    if ev.quadrature_fn is not None:
-        quadrature = ratio / 2 * (np.cos(phi) * Y - np.sin(phi) * X)
-        H = H + _envelope(ev.quadrature_fn) * Hamiltonian(quadrature, ev.wires)
-    # Packed as in jaqsi's pulse gates: [envelope params..., T, w].
-    params = np.append(ev.envelope_params, [ev.duration, ev.w])
-    H.evolve(name=ev.gate)([params] * H.n_terms, ev.duration)
+    q = ev.wires[0]
+    params = (
+        ev.envelope_params,
+        ev.duration,
+        ev.w,
+        ev.carrier_phase,
+        start,
+        config.time_scale,
+        noise.times,
+        noise.amplitude[q],
+        noise.phase[q],
+    )
+    segments = [(0.0, ev.duration, ev.envelope_fn)]
+    if ev.envelope_fn is PulseEnvelope.square:
+        edge = jnp.clip((ev.duration - ev.envelope_params[1]) / 2, 0, ev.duration / 2)
+        segments = [
+            (0.0, edge, _zero),
+            (edge, ev.duration - edge, PulseEnvelope._square_amplitude),
+            (ev.duration - edge, ev.duration, _zero),
+        ]
+    for left, right, envelope in segments:
+        H = _coefficient(envelope, ev.quadrature_fn, 0) * Hamiltonian(
+            ratio / 2 * X, ev.wires
+        )
+        H = H + _coefficient(envelope, ev.quadrature_fn, 1) * Hamiltonian(
+            ratio / 2 * Y, ev.wires
+        )
+        H = H + _static * Hamiltonian(detuning / 2 * Z, ev.wires)
+        evolve = H.evolve(
+            name=ev.gate, collapse_ops=_collapse_ops(true, config.time_scale)
+        )
+        boundaries = jnp.stack([jnp.asarray(left), jnp.asarray(right)])
+        if noise.times.size > 1:
+            # Resolve every interpolation knot, including narrow features that
+            # an adaptive solver could otherwise step over without detecting.
+            knots = jnp.clip((noise.times - start) / config.time_scale, left, right)
+            boundaries = jnp.concatenate([boundaries[:1], knots, boundaries[1:]])
+        for begin, end in zip(boundaries[:-1], boundaries[1:]):
+            evolve([params] * H.n_terms, jnp.stack([begin, end]))
 
 
-def _envelope(fn: Callable) -> Callable:
-    """Coefficient ``w · fn(p, t, T/2)`` of an envelope, ``p = [..., T, w]``."""
+def _coefficient(
+    envelope: Callable, quadrature: Optional[Callable], axis: int
+) -> Callable:
+    """Drive-frame coefficient; all varying data are explicit solver arguments."""
 
-    def coefficient(p, t):
-        return p[-1] * fn(p, t, p[-2] / 2)
+    def coefficient(args, t):
+        p, T, w, phi, start, scale, times, amplitude_noise, phase_noise = args
+        time = start + scale * t
+        amplitude = 1 + jnp.interp(time, times, amplitude_noise)
+        phase = phi + jnp.interp(time, times, phase_noise)
+        E = envelope(p, t, T / 2)
+        Q = 0.0 if quadrature is None else quadrature(p, t, T / 2)
+        component = (
+            E * jnp.cos(phase) - Q * jnp.sin(phase)
+            if axis == 0
+            else E * jnp.sin(phase) + Q * jnp.cos(phase)
+        )
+        return w * amplitude * component
 
     return coefficient
+
+
+def _zero(p, t, t_c):
+    return 0.0
 
 
 def _static(p, t):
