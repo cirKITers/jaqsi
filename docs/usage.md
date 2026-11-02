@@ -28,7 +28,8 @@ For a peek under the hood, here is how each module helps turn a circuit function
 - `simulation.py` contains the statevector, density-matrix, and measurement kernels that run the recorded tape.
 - `memory.py` estimates batch memory use and splits batches into chunks when needed.
 - `drawing.py` renders circuit diagrams and pulse schedules.
-- `evolution.py` turns static or time-dependent Hamiltonians into gates. It also batches pending pulse solves by pulse shape.
+- `evolution.py` turns static or time-dependent Hamiltonians into unitary gates or Lindblad channels. It also batches pending pulse solves by pulse shape.
+- `hardware/` defines pulse schedules, backend interfaces, the mock device and the QiController binding; see [backends](backend.md).
 - `__init__.py` re-exports the common interfaces for `import jaqsi`.
 - `math.py` provides quantum information functions for states and density matrices.
 - `qoc.py` optimizes pulse parameters against target gates.
@@ -40,7 +41,10 @@ A call to `Script.execute(...)` then runs four stages:
 3. **Simulate:** Apply gates and channels in circuit order, resolving pulse evolutions when needed.
 4. **Measure:** Return a state, probabilities, expectation values, or a density matrix; optionally sample shots.
 
-As the whole pipeline is built on JAX, any execution can be differentiated, JIT-compiled and vectorized.
+Exact simulator outputs can be differentiated, JIT-compiled and vectorized with JAX.
+With a hardware backend, `Script.execute` instead plays a schedule and samples
+readout; that interface runs eagerly. The [backend guide](backend.md) explains
+the sampled workflow and the mock's separate differentiable interface.
 
 ## Usage
 
