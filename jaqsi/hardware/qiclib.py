@@ -203,7 +203,7 @@ class QiclibBackend(Backend):
                 # The RZ evolves p * w * Z: a rotation by 2 * p * w.  qiclib
                 # turns RotateFrame(angle) into a phase shift of -angle on later
                 # pulses, the virtual Z of McKay et al., PRA 96, 022330 (2017).
-                angle = 2 * float(item.envelope_params[0]) * item.w
+                angle = 2 * float(item.envelope_params[0]) * float(item.w)
                 RotateFrame(cells[q], self.rz_sign * angle)
                 continue
             if j in swept:
@@ -350,15 +350,17 @@ def _pulse(
         ValueError: If the duration or the time scale is not positive, or
             the amplitude is not finite or beyond qiclib's [-1, 1].
     """
-    if not (event.duration > 0 and config.time_scale > 0):
+    # Schedules retain JAX controls for simulation; device jobs need host scalars.
+    duration = float(event.duration)
+    if not (duration > 0 and config.time_scale > 0):
         raise ValueError(
             f"{event.gate} on wire {event.wires} needs a positive duration and "
             f"time scale, got {event.duration} and {config.time_scale}."
         )
-    length = event.duration * config.time_scale
+    length = duration * config.time_scale
     # The normalized times at which qiclib samples a shape (QiPulse.__call__).
     x = np.arange(0, length, 1 / CONTROLLER_SAMPLE_FREQUENCY_IN_HZ) / length
-    t, t_c = x * event.duration, event.duration / 2
+    t, t_c = x * duration, duration / 2
     p = event.envelope_params
     envelope = np.asarray(event.envelope_fn(p, t, t_c), dtype=complex)
     if event.quadrature_fn is not None:
@@ -367,7 +369,7 @@ def _pulse(
         # Whether the device's IQ mixing keeps the sign of Q is unverified.
         envelope += 1j * np.asarray(event.quadrature_fn(p, t, t_c))
     peak = np.abs(envelope).max() or 1.0  # an all-zero envelope stays zero
-    amplitude = config.amplitude_scale * event.w * peak
+    amplitude = config.amplitude_scale * float(event.w) * peak
     if not abs(amplitude) <= 1:  # NaN fails too, from the envelope or the scale
         raise ValueError(
             f"{event.gate}({event.w:.3g}) on wire {event.wires} needs the device "
@@ -408,7 +410,7 @@ def _play(
         ident = SHAPE_ID_START + len(shapes)
         interpolate = partial(np.interp, xp=x, fp=samples)
         shapes[key] = Shape(f"{ident:#x}", ident, interpolate)
-    phase = event.carrier_phase + np.pi * negative
+    phase = float(event.carrier_phase) + np.pi * negative
     Play(cell, QiPulse(length, cell["manip_frequency"], amplitude, phase, shapes[key]))
 
 
