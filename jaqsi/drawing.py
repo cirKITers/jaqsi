@@ -1,12 +1,12 @@
 from fractions import Fraction
 from typing import Any, Dict, List, Tuple, Union
-from dataclasses import dataclass
 from typing import Optional
 import jax.numpy as jnp
 
 from jaqsi.operations import (
     Operation,
 )
+from jaqsi.hardware.schedule import PulseEvent
 
 
 class TikzFigure:
@@ -501,44 +501,6 @@ def draw_mpl(
     return fig, ax
 
 
-@dataclass
-class PulseEvent:
-    """Single pulse applied to one or more wires.
-
-    Attributes:
-        gate: Gate label, e.g. ``"RX"``, ``"CZ"``.
-        wires: Target qubit wire(s).
-        envelope_fn: Pure envelope function ``(p, t, t_c) -> amplitude``.
-        envelope_params: Envelope-shape parameters (excluding ``w`` and ``t``).
-        w: Rotation angle passed to the gate.
-        duration: Pulse duration (evolution time).
-        carrier_phase: Phase offset for the carrier cosine.
-        parent: Optional high-level gate name that decomposed into this event.
-        quadrature_fn: Quadrature envelope ``(p, t, t_c) -> amplitude`` of a
-            two-quadrature envelope (DRAG), ``None`` otherwise.
-    """
-
-    gate: str
-    wires: List[int]
-    envelope_fn: Any  # (p, t, t_c) -> scalar
-    envelope_params: Any  # jnp array of envelope shape params
-    w: float  # rotation angle
-    duration: float  # evolution time
-    carrier_phase: float = 0.0  # phi_c in cos(omega_c * t + phi_c)
-    parent: Optional[str] = None  # composite gate that owns this pulse
-    quadrature_fn: Any = None  # (p, t, t_c) -> scalar, DRAG only
-
-
-# Leaf gate metadata for pulse schedule drawing.
-# ``physical`` gates have an envelope; virtual gates (RZ, CZ) do not.
-LEAF_META = {
-    "RX": {"carrier_phase": float(jnp.pi), "physical": True},
-    "RY": {"carrier_phase": float(-jnp.pi / 2), "physical": True},
-    "RZ": {"carrier_phase": 0.0, "physical": False},
-    "CZ": {"carrier_phase": 0.0, "physical": False},
-}
-
-
 def _resolve_wires_for_drawing(wire_fn, wires_list):
     """Resolve a ``wire_fn`` string to concrete wire(s) for drawing."""
     if wire_fn == "all":
@@ -573,7 +535,7 @@ def collect_pulse_events(
     Returns:
         Ordered list of :class:`PulseEvent` objects.
     """
-    from jaqsi.gates import PulseEnvelope, PulseInformation
+    from jaqsi.pulses import PulseInformation, leaf_pulse_event
 
     pp_obj = PulseInformation.gate_by_name(gate_name)
     if pp_obj is None:
@@ -584,43 +546,7 @@ def collect_pulse_events(
 
     # --- Leaf gate ---
     if pp_obj.is_leaf:
-        meta = LEAF_META.get(gate_name)
-        if meta is None:
-            raise ValueError(f"Unknown pulse gate: {gate_name!r}")
-
-        info = PulseEnvelope.get(PulseInformation.get_envelope())
-        pp = pp_obj.split_params(pulse_params)
-
-        if meta["physical"]:
-            env_p = pp[:-1]
-            dur = float(pp[-1])
-            return [
-                PulseEvent(
-                    gate=gate_name,
-                    wires=wires_list,
-                    envelope_fn=info["fn"],
-                    envelope_params=jnp.array(env_p),
-                    w=float(w),
-                    duration=dur,
-                    carrier_phase=meta["carrier_phase"],
-                    parent=parent_label,
-                    quadrature_fn=info.get("quadrature_fn"),
-                )
-            ]
-        else:
-            # Virtual gate (RZ, CZ) — no physical envelope
-            return [
-                PulseEvent(
-                    gate=gate_name,
-                    wires=wires_list,
-                    envelope_fn=None,
-                    envelope_params=jnp.ravel(jnp.asarray(pp)),
-                    w=float(w) if not isinstance(w, list) else 0.0,
-                    duration=1.0,
-                    carrier_phase=0.0,
-                    parent=parent_label,
-                )
-            ]
+        return [leaf_pulse_event(gate_name, w, wires_list, pulse_params, parent_label)]
 
     # --- Composite gate ---
     parts = pp_obj.split_params(pulse_params)

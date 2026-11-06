@@ -6,6 +6,7 @@ nav:
   - training.md
   - pulses.md
   - noise.md
+  - backend.md
   - math_utils.md
   - references.md
 theme:

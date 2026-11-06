@@ -358,6 +358,11 @@ class PulseEnvelope:
         return A * (jnp.abs(t - t_c) <= width / 2)
 
     @staticmethod
+    def _square_amplitude(p, t, t_c):
+        """Square-pulse interior; the integration interval supplies its edges."""
+        return p[0]
+
+    @staticmethod
     def cosine(p, t, t_c):
         """Raised cosine envelope. ``p = [A, width]``."""
         A, width = p[0], p[1]
@@ -589,9 +594,10 @@ class PulseEnvelope:
         ``rwa=False``  keeps **both** the slow and the fast
         counter-rotating components.
 
-        Each returned function has a unique ``__code__`` object so the
-        jaqsi solver cache assigns separate compiled XLA programs per
-        envelope shape and per (gate, component) pair.
+        Each returned function has its own ``__code__`` object, and the
+        jaqsi solver cache also keys on the envelope it closes over, so it
+        assigns separate compiled XLA programs per envelope shape and per
+        (gate, component) pair.
 
         The parameter array is ``p = [envelope params..., T, w]``: the
         rotation angle ``w`` is its last element and the pulse duration
@@ -958,7 +964,7 @@ class PulseInformation:
         # Four functions: (RX_X, RX_Y, RY_X, RY_Y) — one per (gate, Pauli)
         # component of the proper interaction-picture drive Hamiltonian.
         rx_x, rx_y, ry_x, ry_y = PulseEnvelope.build_coeff_fns(
-            info["fn"],
+            PulseEnvelope._square_amplitude if name == "square" else info["fn"],
             PulseGates.omega_c,
             PulseGates.omega_q,
             rwa=cls._rwa,
@@ -978,13 +984,11 @@ class PulseInformation:
         PulseGates._active_rwa = cls._rwa
         PulseGates._active_frame = cls._frame
 
-        # The compiled-solver cache in ``Evolution`` is keyed on the code
-        # objects of the coefficient functions.  Rebuilding the coeff
-        # fns above produced fresh code objects, so any cached solver
-        # is now unreachable from the live coefficient functions and
-        # must be evicted to avoid both (a) holding compiled programs
-        # for a previous configuration alive forever and (b) returning
-        # a stale program if ``id`` collisions ever leaked through.
+        # The compiled-solver cache in ``Evolution`` keys on the code and
+        # the captured values of the coefficient functions, so the coeff
+        # fns rebuilt above never reuse a solver of the previous
+        # configuration.  Evict those solvers anyway: the cache would keep
+        # their compiled programs alive otherwise.
         Evolution.clear_evolve_solver_cache()
 
         log.info(
@@ -1165,6 +1169,76 @@ def _duration(pulse_params):
     return pulse_params[-1]
 
 
+def _drive_interval(pulse_params, duration):
+    """Differentiate square-pulse edges through the integration endpoints."""
+    if PulseInformation.get_envelope() != "square":
+        return duration
+    xp = np if _is_concrete(pulse_params) else jnp
+    edge = xp.clip((duration - pulse_params[1]) / 2, 0, duration / 2)
+    return xp.stack([edge, duration - edge])
+
+
+# Leaf gate metadata of the recorded pulse events.
+# ``physical`` gates have an envelope; virtual gates (RZ, CZ) do not.
+LEAF_META = {
+    "RX": {"carrier_phase": 0.0, "physical": True},
+    "RY": {"carrier_phase": float(jnp.pi / 2), "physical": True},
+    "RZ": {"carrier_phase": 0.0, "physical": False},
+    "CZ": {"carrier_phase": 0.0, "physical": False},
+}
+
+
+def leaf_pulse_event(gate_name, w, wires, pulse_params=None, parent=None):
+    """Build the pulse event of a leaf gate (RX, RY, RZ, CZ).
+
+    Args:
+        gate_name: Name of the leaf gate.
+        w: Rotation angle.
+        wires: Qubit index or indices.
+        pulse_params: Pulse parameters of the gate, ``None`` for its defaults.
+        parent: Label of the enclosing composite gate.
+
+    Returns:
+        :class:`~jaqsi.hardware.schedule.PulseEvent` of the gate.
+
+    Raises:
+        ValueError: If *gate_name* is not a leaf gate.
+    """
+    from jaqsi.hardware.schedule import PulseEvent
+
+    meta = LEAF_META.get(gate_name)
+    if meta is None:
+        raise ValueError(f"Unknown pulse gate: {gate_name!r}")
+
+    wires_list = [wires] if isinstance(wires, int) else list(wires)
+    pp = PulseInformation.gate_by_name(gate_name).split_params(pulse_params)
+
+    if meta["physical"]:
+        info = PulseEnvelope.get(PulseInformation.get_envelope())
+        return PulseEvent(
+            gate=gate_name,
+            wires=wires_list,
+            envelope_fn=info["fn"],
+            envelope_params=jnp.array(pp[:-1]),
+            w=w,
+            duration=pp[-1],
+            carrier_phase=meta["carrier_phase"],
+            parent=parent,
+            quadrature_fn=info.get("quadrature_fn"),
+        )
+    # Virtual gate (RZ, CZ) — no physical envelope
+    return PulseEvent(
+        gate=gate_name,
+        wires=wires_list,
+        envelope_fn=None,
+        envelope_params=jnp.ravel(jnp.asarray(pp)),
+        w=w if not isinstance(w, list) else 0.0,
+        duration=1.0,
+        carrier_phase=0.0,
+        parent=parent,
+    )
+
+
 class PulseGates:
     """Pulse-level implementations of quantum gates.
 
@@ -1279,44 +1353,7 @@ class PulseGates:
         ptape = active_pulse_tape()
         if ptape is None:
             return
-
-        from jaqsi.drawing import PulseEvent, LEAF_META
-
-        meta = LEAF_META.get(gate_name, {})
-        wires_list = [wires] if isinstance(wires, int) else list(wires)
-
-        if meta.get("physical", False):
-            info = PulseEnvelope.get(PulseInformation.get_envelope())
-            pp = PulseInformation.gate_by_name(gate_name).split_params(pulse_params)
-            env_p = pp[:-1]
-            dur = float(pp[-1])
-            ptape.append(
-                PulseEvent(
-                    gate=gate_name,
-                    wires=wires_list,
-                    envelope_fn=info["fn"],
-                    envelope_params=jnp.array(env_p),
-                    w=float(w),
-                    duration=dur,
-                    carrier_phase=meta["carrier_phase"],
-                    parent=parent,
-                    quadrature_fn=info.get("quadrature_fn"),
-                )
-            )
-        else:
-            pp = PulseInformation.gate_by_name(gate_name).split_params(pulse_params)
-            ptape.append(
-                PulseEvent(
-                    gate=gate_name,
-                    wires=wires_list,
-                    envelope_fn=None,
-                    envelope_params=jnp.ravel(jnp.asarray(pp)),
-                    w=float(w) if not isinstance(w, list) else 0.0,
-                    duration=1.0,
-                    carrier_phase=0.0,
-                    parent=parent,
-                )
-            )
+        ptape.append(leaf_pulse_event(gate_name, w, wires, pulse_params, parent))
 
     @staticmethod
     def Rot(
@@ -1404,7 +1441,9 @@ class PulseGates:
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
         env_params = _pack_params(pulse_params, slice(None), w)
         # All terms share the same parameter array.
-        H_eff.evolve(name="RX")([env_params] * H_eff.n_terms, t)
+        H_eff.evolve(name="RX")(
+            [env_params] * H_eff.n_terms, _drive_interval(pulse_params, t)
+        )
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod
@@ -1445,7 +1484,9 @@ class PulseGates:
         # RY calls.
         w, random_key = UnitaryGates.GateError(w, noise_params, random_key)
         env_params = _pack_params(pulse_params, slice(None), w)
-        H_eff.evolve(name="RY")([env_params] * H_eff.n_terms, t)
+        H_eff.evolve(name="RY")(
+            [env_params] * H_eff.n_terms, _drive_interval(pulse_params, t)
+        )
         UnitaryGates.Noise(wires, noise_params)
 
     @staticmethod

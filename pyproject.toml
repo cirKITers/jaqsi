@@ -46,6 +46,10 @@ Documentation = "https://cirkiters.github.io/jaqsi/"
 [project.optional-dependencies]
 cuda12 = ["jax[cuda12]>=0.9.0.1"]
 cuda13 = ["jax[cuda13]>=0.9.0.1"]
+# qiclib and qicode are GPL-3.0 while jaqsi is MIT, so the CI license check
+# leaves this extra out (licensecheck scans extras only with --extras).
+# qiclib 3 moved to protobuf 7 and has not been run on the device yet.
+qiclib = ["qiclib>=2.5.3,<3", "qicode>=0.2.0"]
 
 [dependency-groups]
 dev = [
@@ -88,6 +92,10 @@ max-complexity = 18
 
 [tool.licensecheck]
 fail_packages = ["typing_extensions"]
+
+[tool.ty.analysis]
+# Imported by jaqsi/hardware/qiclib.py only, from the optional qiclib extra.
+allowed-unresolved-imports = ["qiclib.**", "qicode"]
 
 [tool.pytest.ini_options]
 markers = [

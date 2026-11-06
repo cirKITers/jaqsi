@@ -1,4 +1,4 @@
-"""Evolve Hamiltonians into gates by solving ``dU/dt = -i H(t) U``.
+"""Evolve Hamiltonians into unitary gates or Lindblad channels.
 
 Use ``Hermitian.evolve`` or ``ParametrizedHamiltonian.evolve`` to create gates.
 Configure the solver with :meth:`Evolution.set_solver_defaults`.
@@ -22,12 +22,13 @@ from jaqsi.operations import (
     Hermitian,
     ParametrizedHamiltonian,
     Operation,
+    _contract_and_restore,
 )
 
 
 class Evolution:
     # Module-level cache for JIT-compiled ODE solvers.  Keyed on
-    # (coeff_fn_id, dim, atol, rtol, max_steps, throw) so that all
+    # (_coeff_key per coeff fn, dim, atol, rtol, max_steps, throw) so that all
     # evolve() calls with the same pulse shape function and matrix size
     # share one compiled XLA program.  This turns O(n_gates) JIT
     # compilations into O(n_distinct_pulse_shapes) during pulse-mode
@@ -158,12 +159,11 @@ class Evolution:
     def clear_evolve_solver_cache(cls) -> None:
         """Drop every cached compiled evolve solver.
 
-        Call this whenever the coefficient functions referenced by the
-        cache keys are rebuilt (e.g. when :class:`PulseGates` swaps in
-        a new pulse envelope, RWA flag or frame).  Without an explicit
-        eviction the cache keeps the old code objects alive and would
-        also retain XLA programs that no longer match any active
-        coefficient function.
+        The cache keys hold what the coefficient functions capture (see
+        :func:`_coeff_key`), so rebuilt functions never reuse a stale
+        solver.  Call this to release the solvers of functions no longer
+        in use (e.g. when :class:`PulseGates` swaps in a new pulse
+        envelope, RWA flag or frame); the cache keeps them alive otherwise.
         """
         with cls._evolve_solver_cache_lock:
             cls._evolve_solver_cache.clear()
@@ -283,10 +283,11 @@ class Evolution:
 
         @eqx.filter_jit
         def _solve(neg_iH_split, params, t0, t1):
-            """Solve dU/dt = sum_i f_i(p_i, t) * (-iH_i) * U from t0 to t1.
+            """Solve dP/dt = sum_i f_i(p_i, t) * G_i * P from t0 to t1.
 
             ``neg_iH_split`` has shape ``(n_terms, 2, dim, dim)`` with
-            ``[:, 0]`` = Re(-iH_i) and ``[:, 1]`` = Im(-iH_i).
+            real and imaginary parts of the generators ``G_i``. These are
+            ``-iH_i`` for unitaries or Liouvillian terms for channels.
             ``params`` is a list/tuple of length ``n_terms`` carrying
             each term's coefficient parameters.  The state ``y`` has
             shape ``(2, dim, dim)`` with ``y[0] = Re(U)`` and
@@ -408,23 +409,30 @@ class Evolution:
         cls,
         hamiltonian: Union["Hermitian", "ParametrizedHamiltonian"],
         name: Optional[str] = None,
+        collapse_ops: Optional[List[Any]] = None,
         **odeint_kwargs: Any,
     ) -> Callable:
         """Return a gate factory for static or time-dependent evolution.
 
-        Static Hamiltonians use ``exp(-i t H)``. Time-dependent Hamiltonians
-        solve the Schrödinger equation with the configured solver. Both modes
-        support JAX differentiation.
+        Without collapse operators, static Hamiltonians use ``exp(-i t H)``
+        and time-dependent Hamiltonians solve the Schrödinger equation.
+        Supplying collapse operators integrates a Lindblad propagator with
+        the configured solver. Both paths support JAX differentiation.
 
         Args:
             hamiltonian: Either a :class:`Hermitian` (static evolution) or a
                 :class:`ParametrizedHamiltonian` (time-dependent evolution).
+            collapse_ops: Constant collapse matrices, including square-root
+                rates, on the Hamiltonian's wires. ``None`` selects unitary
+                evolution; a list selects a Lindblad channel.
             **odeint_kwargs: Solver options such as ``atol`` and ``rtol``.
 
         Returns:
             A callable gate factory.  Signature depends on the mode:
 
-            - Static: ``(t, wires=0) -> Operation``
+            - Static unitary: ``(t, wires=0) -> Operation``
+            - Static channel: ``(t, wires=None) -> Operation``, defaulting to
+              the Hamiltonian's wires.
             - Time-dependent: ``(coeff_args, T) -> Operation``
 
         Raises:
@@ -432,9 +440,26 @@ class Evolution:
                 ``ParametrizedHamiltonian``.
         """
         if isinstance(hamiltonian, Hermitian):
+            if collapse_ops is not None:
+                factory = cls._evolve_parametrized(
+                    _constant * hamiltonian,
+                    name=name,
+                    collapse_ops=collapse_ops,
+                    **odeint_kwargs,
+                )
+
+                def apply_channel(t, wires=None):
+                    op = factory([()], t)
+                    if wires is not None:
+                        op.wires = wires
+                    return op
+
+                return apply_channel
             return cls._evolve_static(hamiltonian, name=name)
         elif isinstance(hamiltonian, ParametrizedHamiltonian):
-            return cls._evolve_parametrized(hamiltonian, name=name, **odeint_kwargs)
+            return cls._evolve_parametrized(
+                hamiltonian, name=name, collapse_ops=collapse_ops, **odeint_kwargs
+            )
         else:
             raise TypeError(
                 f"evolve() expects a Hermitian or ParametrizedHamiltonian, "
@@ -459,6 +484,7 @@ class Evolution:
         cls,
         ph: ParametrizedHamiltonian,
         name: Optional[str] = None,
+        collapse_ops: Optional[List[Any]] = None,
         **odeint_kwargs: Any,
     ) -> Callable:
         """Gate factory for time-dependent (multi-term) Hamiltonian evolution.
@@ -471,6 +497,9 @@ class Evolution:
         may contain one or more ``coeff_fn * Hermitian`` terms (see
         :class:`ParametrizedHamiltonian`); the single-term case is the
         usual ``coeff_fn * Hermitian`` and is fully backward compatible.
+        With ``collapse_ops``, replace the Hamiltonian generators by their
+        Liouvillians and append the constant dissipator. The same matrix ODE
+        then evolves the channel from the identity superoperator.
 
         Implementation notes:
 
@@ -486,11 +515,12 @@ class Evolution:
           ``einsum`` against the per-step coefficient vector
           ``c = [f_0(p_0,t), ..., f_{n-1}(p_{n-1},t)]``.
 
-        - A single term with a concrete matrix is solved in closed form by the
-          adaptive solvers, see :meth:`_build_closed_form_evolve_solver`.
+        - A single unitary term with a concrete matrix is solved in closed form
+          by the adaptive solvers, see :meth:`_build_closed_form_evolve_solver`.
 
         - The JIT-compiled solver is cached per coefficient-function code
-          tuple (and ``dim``, tolerances) so multiple ``evolve()`` calls
+          and captured values (see :func:`_coeff_key`), ``dim`` and
+          tolerances, so multiple ``evolve()`` calls
           with the same pulse shape — but different Hamiltonian matrices
           or parameters — reuse the same compiled XLA program.
 
@@ -498,6 +528,8 @@ class Evolution:
 
         Args:
             ph: A :class:`ParametrizedHamiltonian` (one or more terms).
+            collapse_ops: Constant collapse matrices including square-root rates,
+                or ``None`` for unitary evolution.
             **odeint_kwargs: Keyword arguments forwarded to
                 ``diffrax.diffeqsolve``.  Recognised keys:
 
@@ -524,7 +556,7 @@ class Evolution:
         coeff_fns = ph.coeff_fns  # tuple of callables
         H_mats = ph.H_mats  # tuple of (dim, dim)
         wires = ph.wires
-        n_terms = ph.n_terms
+        n_params = ph.n_terms
         dim = H_mats[0].shape[0]
 
         # Real dtype matching the precision mode
@@ -536,11 +568,31 @@ class Evolution:
         # parts so the ODE RHS uses only real arithmetic.  Final shape:
         # (n_terms, 2, dim, dim).  Concrete matrices are kept in numpy so
         # that ``resolve_pending`` can recognise identical gates in a trace.
-        xp = jnp if any(isinstance(H, jax.core.Tracer) for H in H_mats) else np
+        matrices = H_mats + tuple(collapse_ops or ())
+        xp = jnp if any(isinstance(H, jax.core.Tracer) for H in matrices) else np
+        generators = [-1j * H for H in H_mats]
+        if collapse_ops is not None:
+            eye = xp.eye(dim)
+            generators = [-1j * (xp.kron(H, eye) - xp.kron(eye, H.T)) for H in H_mats]
+            dissipator = xp.zeros((dim * dim, dim * dim), dtype=complex)
+            for operator in collapse_ops:
+                C = xp.asarray(operator)
+                if C.shape != (dim, dim):
+                    raise ValueError(f"Collapse matrices must have shape {(dim, dim)}.")
+                cc = C.conj().T @ C
+                dissipator = (
+                    dissipator
+                    + xp.kron(C, C.conj())
+                    - 0.5 * (xp.kron(cc, eye) + xp.kron(eye, cc.T))
+                )
+            generators.append(dissipator)
+            coeff_fns = coeff_fns + (_constant,)
+            dim *= dim
+        n_terms = len(coeff_fns)
         neg_iH_split = xp.stack(
             [
-                xp.stack([xp.real(-1j * H_mat), xp.imag(-1j * H_mat)], axis=0)
-                for H_mat in H_mats
+                xp.stack([xp.real(generator), xp.imag(generator)], axis=0)
+                for generator in generators
             ],
             axis=0,
         )
@@ -551,6 +603,8 @@ class Evolution:
         atol, rtol, max_steps, throw, solver_name, magnus_steps, closed_form = (
             cls._parse_evolve_solver_options(odeint_kwargs)
         )
+        if collapse_ops is not None and solver_name not in ("dopri8", "dopri5"):
+            raise ValueError("Lindblad evolution supports 'dopri8' and 'dopri5'.")
 
         # A concrete single term is solved in closed form by the adaptive
         # solvers.  Its eigenbasis is taken here, so that the unitary is
@@ -559,6 +613,7 @@ class Evolution:
         eigen = None
         if (
             closed_form
+            and collapse_ops is None
             and n_terms == 1
             and xp is np
             and solver_name in ("dopri8", "dopri5")
@@ -568,18 +623,20 @@ class Evolution:
             eigen = (lam.astype(np_rdtype), V.astype(np_cdtype))
         solve_bytes = memory.solve_bytes(dim, solver_name, eigen is not None)
 
-        # Cache key:  every coeff fn's code object (same shape of pulse
-        # fns -> same JIT program) plus dim, tolerances, solver choice and
-        # budget (different budgets mean different XLA programs); the
-        # ``throw`` flag is appended per solver variant.  We use the code
-        # object itself (hashable, identity-equal) rather than
+        # Cache key:  every coeff fn's code object and captured values
+        # (same pulse shape -> same JIT program, see ``_coeff_key``) plus
+        # dim, tolerances, solver choice and budget (different budgets mean
+        # different XLA programs); the ``throw`` flag is appended per solver
+        # variant.  ``resolve_pending`` batches the gates of one key.  We use
+        # the code object itself (hashable, identity-equal) rather than
         # ``id(fn.__code__)``: ids can be reused for later code objects
         # after the original is garbage-collected, which would silently
         # return a stale compiled solver for a different pulse shape.
         # Holding the code object in the cache keeps it alive for as long
         # as the cached program is valid.
         base_key = (
-            tuple(fn.__code__ for fn in coeff_fns),
+            collapse_ops is not None,
+            tuple(_coeff_key(fn) for fn in coeff_fns),
             dim,
             atol,
             rtol,
@@ -653,19 +710,23 @@ class Evolution:
             else:
                 params = (coeff_args,)
 
-            if len(params) != n_terms:
+            if len(params) != n_params:
                 raise ValueError(
-                    f"Expected {n_terms} parameter set(s) for a "
-                    f"{n_terms}-term ParametrizedHamiltonian, "
+                    f"Expected {n_params} parameter set(s) for a "
+                    f"{n_params}-term ParametrizedHamiltonian, "
                     f"got {len(params)}."
                 )
+            if collapse_ops is not None:
+                params = params + ((),)
 
             # Build time span — resolve at Python level to avoid traced
             # branching.  ``T`` is either a Python scalar / 0-d array (=> integrate
             # on [0, T]) or a 2-element sequence/array (=> integrate on [T[0], T[1]]).
             # Let ``_solve`` cast t0/t1 to its working dtype; we only need the
             # array form to know the rank.
-            if isinstance(T, jax.core.Tracer):
+            if any(
+                isinstance(t, jax.core.Tracer) for t in jax.tree_util.tree_leaves(T)
+            ):
                 T_arr = jnp.asarray(T, dtype=_rdtype)
             else:
                 T_arr = np.asarray(T, dtype=np_rdtype)
@@ -676,12 +737,24 @@ class Evolution:
                 t0 = T_arr[0]
                 t1 = T_arr[1]
 
-            return PendingEvolution(
+            if collapse_ops is not None:
+                t1 = eqx.error_if(
+                    jnp.asarray(t1),
+                    (t1 < t0) | ~jnp.isfinite(t0) | ~jnp.isfinite(t1),
+                    "Lindblad evolution needs a finite, nonnegative time interval.",
+                )
+            operation = PendingEvolution if collapse_ops is None else PendingLindblad
+            return operation(
                 wires=wires,
                 name=name,
                 solver_for=solver_for,
                 throw=throw,
-                group_key=(base_key, throw, tuple(jnp.shape(p) for p in params)),
+                group_key=(
+                    base_key,
+                    throw,
+                    jax.tree_util.tree_structure(params),
+                    tuple(jnp.shape(p) for p in jax.tree_util.tree_leaves(params)),
+                ),
                 inputs=(neg_iH_split if eigen is None else eigen, params, t0, t1),
                 scratch_bytes=solve_bytes,
             )
@@ -689,19 +762,8 @@ class Evolution:
         return _apply
 
 
-class PendingEvolution(Operation):
-    """Time-evolution gate whose unitary is solved lazily.
-
-    Returned by the gate factories of :meth:`Evolution.evolve` for
-    time-dependent Hamiltonians.  Deferring the ODE solve lets
-    :func:`resolve_pending` batch all pending gates of a tape into one
-    ``jax.vmap`` call per pulse shape; reading :attr:`matrix` before that
-    solves this gate on its own.
-    """
-
-    # Unitary up to solver tolerance for the adaptive integrators, exactly
-    # for the Magnus ones.
-    is_unitary = True
+class _PendingEvolution(Operation):
+    """Deferred linear propagator, resolved with matching solves in one batch."""
 
     def __init__(
         self,
@@ -720,15 +782,52 @@ class PendingEvolution(Operation):
         self._inputs = inputs
         self._scratch_bytes = scratch_bytes  # per sample, see memory.solve_bytes
 
-    @property
-    def matrix(self) -> jnp.ndarray:
+    def _solve(self) -> jnp.ndarray:
         if self._matrix is None:
             self._matrix = self._solver_for(self._throw)(*self._inputs)
-        return self._matrix
+        return jnp.asarray(self._matrix)
+
+
+class PendingEvolution(_PendingEvolution):
+    """Unitary pulse propagator, solved lazily or by :func:`resolve_pending`."""
+
+    is_unitary = True
+
+    @property
+    def matrix(self) -> jnp.ndarray:
+        return self._solve()
+
+
+class PendingLindblad(_PendingEvolution):
+    """Local Lindblad channel in row-major density-matrix vectorization."""
+
+    @property
+    def matrix(self) -> jnp.ndarray:
+        raise TypeError("A Lindblad channel has a superoperator, not a unitary matrix.")
+
+    @property
+    def superoperator(self) -> jnp.ndarray:
+        return self._solve()
+
+    def apply_to_density(self, rho: jnp.ndarray, n_qubits: int) -> jnp.ndarray:
+        k = 2 * len(self.wires)
+        axes = list(self.wires) + [q + n_qubits for q in self.wires]
+        result = _contract_and_restore(
+            rho.reshape((2,) * (2 * n_qubits)),
+            self.superoperator.reshape((2,) * (2 * k)),
+            k,
+            axes,
+        )
+        return result.reshape(rho.shape)
+
+
+def _constant(p, t):
+    """Coefficient of a time-independent generator."""
+    return 1.0
 
 
 def resolve_pending(tape: List[Operation]) -> List[int]:
-    """Solve all unresolved :class:`PendingEvolution` gates on *tape* in batches.
+    """Resolve pending unitary and Lindblad propagators on *tape* in batches.
 
     Gates sharing a solver (coefficient functions, matrix size, solver
     settings) and parameter shapes are stacked and solved with a single
@@ -747,7 +846,7 @@ def resolve_pending(tape: List[Operation]) -> List[int]:
         # Identical gates (a repeated fixed-angle rotation, the same CZ on
         # several wire pairs) are solved once.  XLA deduplicated them across
         # sequential solves; stacked copies it cannot.
-        unique: Dict[tuple, List[PendingEvolution]] = {}
+        unique: Dict[tuple, List[_PendingEvolution]] = {}
         for op in group:
             unique.setdefault(_signature(op._inputs), []).append(op)
         ops = [members[0] for members in unique.values()]
@@ -773,11 +872,11 @@ def resolve_pending(tape: List[Operation]) -> List[int]:
     return sizes
 
 
-def _pending_groups(tape: List[Operation]) -> List[List[PendingEvolution]]:
+def _pending_groups(tape: List[Operation]) -> List[List[_PendingEvolution]]:
     """Unresolved pulse gates of *tape*, grouped by the solve they share."""
-    groups: Dict[tuple, List[PendingEvolution]] = {}
+    groups: Dict[tuple, List[_PendingEvolution]] = {}
     for op in tape:
-        if isinstance(op, PendingEvolution) and op._matrix is None:
+        if isinstance(op, _PendingEvolution) and op._matrix is None:
             groups.setdefault(op._group_key, []).append(op)
     return list(groups.values())
 
@@ -813,6 +912,34 @@ def _on_host(fn: Callable) -> Callable:
     return wrapped
 
 
+def _coeff_key(fn: Any) -> tuple:
+    """Key of a coefficient function in the solver cache and the batches.
+
+    Closures built by one factory share a code object and differ only in the
+    values bound to them, such as the envelope a coefficient closes over, so
+    the key holds the code and those values: the closure cells, the default
+    arguments and, for a bound method, the instance.  A hashable value is
+    compared by type and value, a function thus by identity.  An unhashable
+    one, such as an array, is compared by its id.  That is sound because a
+    cached solver keeps the function it was built from alive, as a pending
+    gate keeps its own, so no other object can take the id while a key
+    holding it is in use.  Values the function looks up when called, such as
+    globals or attributes, are not part of the key.
+    """
+    bound = [cell.cell_contents for cell in fn.__closure__ or ()]
+    bound += [*(fn.__defaults__ or ()), *(fn.__kwdefaults__ or {}).values()]
+    bound.append(getattr(fn, "__self__", None))
+    key: List[Any] = [fn.__code__]
+    for value in bound:
+        try:
+            hash(value)
+        except TypeError:
+            key.append(("id", id(value)))
+        else:
+            key.append((type(value), value))
+    return tuple(key)
+
+
 def _leaf_key(x: Any) -> tuple:
     """Hashable identity of a solver input: value if concrete, else object id."""
     if isinstance(x, jax.core.Tracer):
@@ -834,7 +961,7 @@ def _same_leaf(a: Any, b: Any) -> bool:
     return bool(np.array_equal(np.asarray(a), np.asarray(b)))
 
 
-def _stack_inputs(ops: List["PendingEvolution"]) -> Tuple[tuple, tuple]:
+def _stack_inputs(ops: List[_PendingEvolution]) -> Tuple[tuple, tuple]:
     """Stack the solver inputs of a group along a new leading axis.
 
     Inputs that are identical across the group (typically the Hamiltonian
@@ -858,7 +985,7 @@ def _stack_inputs(ops: List["PendingEvolution"]) -> Tuple[tuple, tuple]:
 
 
 def _solve_group(solve: Callable, inputs: tuple, in_axes: tuple, n: int) -> jnp.ndarray:
-    """Run *solve* over the group, returning ``(n, dim, dim)`` unitaries."""
+    """Run *solve* over the group, returning ``(n, dim, dim)`` propagators."""
     if not any(ax == 0 for ax in jax.tree_util.tree_leaves(in_axes)):
         U = solve(*inputs)  # every gate in the group is the same solve
         return jnp.broadcast_to(U, (n,) + U.shape)

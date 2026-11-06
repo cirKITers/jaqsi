@@ -10,6 +10,8 @@ from jaqsi.operations import Operation
 from jaqsi.noise import KrausChannel
 from jaqsi.tape import recording, pulse_recording
 from jaqsi.drawing import draw_text, draw_mpl, draw_tikz
+from jaqsi.hardware.backend import Backend, diagonals, labels_to_result
+from jaqsi.hardware.schedule import Schedule, build_schedule, validate
 from jaqsi.unitary import UnitaryGates
 from jaqsi.evolution import Evolution, scratch_bytes
 from jaqsi import simulation, memory
@@ -162,10 +164,17 @@ class Script:
         _n_qubits: Optionally pre-declared number of qubits.  When ``None``
             the qubit count is inferred from the operations recorded on the
             tape.
+        backend: Hardware backend that :meth:`execute` runs on instead of
+            the simulator, or ``None``.
 
     """
 
-    def __init__(self, f: Callable[..., None], n_qubits: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        f: Callable[..., None],
+        n_qubits: Optional[int] = None,
+        backend: Optional[Backend] = None,
+    ) -> None:
         """Initialise a Script.
 
         Args:
@@ -173,9 +182,11 @@ class Script:
                 Signature: ``f(*args, **kwargs) -> None``.
             n_qubits: Number of qubits.  If ``None``, inferred from the
                 operations recorded on the tape.
+            backend: Hardware backend to run on instead of the simulator.
         """
         self.f = f
         self._n_qubits = n_qubits
+        self.backend = backend
         self._jit_cache: dict = {}  # keyed on (type, in_axes, arg_shapes, gateError)
 
     def __getstate__(self) -> dict:
@@ -208,7 +219,7 @@ class Script:
 
         Activates both the normal operation tape (so gates execute) and
         a pulse-event tape that captures
-        :class:`~jaqsi.drawing.PulseEvent` objects from leaf
+        :class:`~jaqsi.hardware.schedule.PulseEvent` objects from leaf
         pulse gates (RX, RY, RZ, CZ).
 
         Args:
@@ -216,12 +227,36 @@ class Script:
             **kwargs (Any): Forwarded to the circuit function.
 
         Returns:
-            List of :class:`~jaqsi.drawing.PulseEvent`.
+            List of :class:`~jaqsi.hardware.schedule.PulseEvent`.
         """
         with pulse_recording() as events:
             with recording():
                 self.f(*args, **kwargs)
         return events
+
+    def schedule(self, *args, **kwargs) -> Schedule:
+        """Run the circuit and build the pulse schedule a hardware backend plays.
+
+        Args:
+            *args (Any): Forwarded to the circuit function.
+            **kwargs (Any): Forwarded to the circuit function.
+
+        Returns:
+            :class:`~jaqsi.hardware.schedule.Schedule` of the circuit.
+
+        Raises:
+            ValueError: If an operation has no pulse, see
+                :func:`~jaqsi.hardware.schedule.build_schedule`.
+        """
+        return self._schedule(args, kwargs, [])
+
+    def _schedule(self, args: tuple, kwargs: dict, obs: List[Operation]) -> Schedule:
+        """Build the schedule over the qubits of the circuit and of *obs*."""
+        with pulse_recording() as events:
+            with recording() as tape:
+                self.f(*args, **kwargs)
+        n_qubits = self._n_qubits or simulation.infer_n_qubits(tape, obs)
+        return build_schedule(tape, events, n_qubits)
 
     def execute(
         self,
@@ -265,9 +300,10 @@ class Script:
             shots: Number of measurement shots for stochastic sampling.
                 If ``None`` (default), exact analytic results are returned.
                 Only supported for ``"probs"`` and ``"expval"`` measurement
-                types.
+                types.  Required with a backend.
             key: JAX PRNG key for shot sampling.  If ``None`` and *shots*
                 is set, a default key ``jax.random.PRNGKey(0)`` is used.
+                Unused with a backend, whose shots are sampled by the device.
             initial_state: Optional statevector to start the simulation from
                 instead of |00…0⟩.  Without *in_axes* it must be a 1D state of
                 shape ``(2**n,)``.  With *in_axes* it may be 1D (broadcast across
@@ -287,6 +323,10 @@ class Script:
             obs = []
         if kwargs is None:
             kwargs = {}
+        if self.backend is not None:
+            return self._execute_backend(
+                self.backend, type, obs, args, kwargs, in_axes, shots, initial_state
+            )
         if shots is not None and key is None:
             key = jax.random.PRNGKey(0)
         if initial_state is not None:
@@ -333,6 +373,67 @@ class Script:
                 key=key,
                 initial_state=initial_state,
             )
+
+    def _execute_backend(
+        self,
+        backend: Backend,
+        type: str,
+        obs: List[Operation],
+        args: tuple,
+        kwargs: dict,
+        in_axes: Optional[Tuple],
+        shots: Optional[int],
+        initial_state: Optional[jnp.ndarray],
+    ) -> jnp.ndarray:
+        """Run the circuit on *backend*, one schedule per batch sample.
+
+        Arguments are as in :meth:`execute`.  The pulse angles are read as
+        floats, so this runs eagerly: it builds the schedules in a Python loop
+        over the batch axis and hands them to :meth:`Backend.run_batch` at
+        once.
+
+        Raises:
+            ValueError: If *shots* is missing, *type* is neither ``"probs"``
+                nor ``"expval"``, *initial_state* is set, the arguments are
+                JAX tracers, *in_axes* does not match *args*, an observable is
+                not diagonal, or the backend cannot play the circuit.
+        """
+        if shots is None:
+            raise ValueError("A backend samples shots; pass shots=N.")
+        if type not in ("probs", "expval"):
+            raise ValueError(f"A backend returns 'probs' or 'expval', got {type!r}.")
+        if initial_state is not None:
+            raise ValueError("A backend starts from |0...0>; drop initial_state.")
+        if self._args_contain_tracer((args, kwargs)):
+            raise ValueError(
+                "A backend runs eagerly; it cannot be traced by jit, grad or vmap."
+            )
+
+        if in_axes is None:
+            samples = [args]
+        elif len(in_axes) != len(args):
+            raise ValueError(
+                f"in_axes has {len(in_axes)} entries but args has {len(args)}. "
+                "Provide one in_axes entry per positional argument."
+            )
+        else:
+            samples = [
+                tuple(
+                    a if ax is None else jax.lax.index_in_dim(a, i, ax, keepdims=False)
+                    for a, ax in zip(args, in_axes)
+                )
+                for i in range(self._batch_size(args, in_axes))
+            ]
+        schedules = [self._schedule(sample, kwargs, obs) for sample in samples]
+        for schedule in schedules:
+            validate(schedule, backend.leaves)
+        if type == "expval":
+            diagonals(obs, schedules[0].n_qubits)  # raises before the device runs
+        results = [
+            labels_to_result(labels, type, obs)[0]
+            for labels in backend.run_batch(schedules, shots)
+        ]
+        return results[0] if in_axes is None else jnp.stack(results)
 
     @staticmethod
     def _args_contain_tracer(args: tuple) -> bool:

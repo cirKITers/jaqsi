@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np  # needed to prevent jitting some operations
 
-from jaqsi.evolution import resolve_pending
+from jaqsi.evolution import PendingLindblad, resolve_pending
 from jaqsi.operations import (
     Operation,
     GateStructure,
@@ -57,9 +57,9 @@ def has_noise(tape: List[Operation]) -> bool:
         tape: Ordered list of gate/channel operations.
 
     Returns:
-        ``True`` if any operation is a :class:`~jaqsi.noise.KrausChannel`.
+        ``True`` if any operation is a Kraus or Lindblad channel.
     """
-    return any(isinstance(op, KrausChannel) for op in tape)
+    return any(isinstance(op, (KrausChannel, PendingLindblad)) for op in tape)
 
 
 def _stack_obs(obs: List[Operation], n_qubits: int) -> jnp.ndarray:
@@ -370,9 +370,8 @@ def _compile_mixed(tape: List[Operation], n_qubits: int) -> List[Gate]:
             continue
         ket = tuple(op.wires)
         bra = tuple(w + n_qubits for w in op.wires)
-        if isinstance(op, KrausChannel):
-            superop = sum(jnp.kron(K, jnp.conj(K)) for K in op.kraus_matrices())
-            gates.append(Gate(superop, ket + bra))
+        if isinstance(op, (KrausChannel, PendingLindblad)):
+            gates.append(Gate(op.superoperator, ket + bra))
         elif len(ket) <= 2:
             gates.append(Gate(jnp.kron(op.matrix, jnp.conj(op.matrix)), ket + bra))
         else:
