@@ -687,17 +687,19 @@ class Hermitian(Operation):
         return ParametrizedHamiltonian(terms=[(coeff_fn, H, self.wires)])
 
     def evolve(self, name: Optional[str] = None, **odeint_kwargs) -> Callable:
-        """Return a gate factory for static evolution ``U = exp(-i t H)``.
+        """Return a factory for static unitary or Lindblad evolution.
 
         Thin delegator to :meth:`jaqsi.evolution.Evolution.evolve`.
 
         Args:
             name: Optional name for the produced :class:`Operation`.
-            **odeint_kwargs: Unused for static evolution (accepted for a
-                uniform signature with :meth:`ParametrizedHamiltonian.evolve`).
+            **odeint_kwargs: ``collapse_ops=[C, ...]`` selects a Lindblad
+                channel, including square-root rates in each matrix. Solver
+                options are forwarded to ``Evolution.evolve`` for channels.
 
         Returns:
-            A callable gate factory ``(t, wires=0) -> Operation``.
+            A callable ``(t, wires=0) -> Operation`` for unitaries. Channels
+            default to this Hamiltonian's wires unless explicitly overridden.
         """
         from jaqsi.evolution import Evolution  # deferred: circular import
 
@@ -829,14 +831,16 @@ class ParametrizedHamiltonian:
     # --- evolution -----------------------------------------------------
 
     def evolve(self, name: Optional[str] = None, **odeint_kwargs) -> Callable:
-        """Return a gate factory for time-dependent evolution.
+        """Return a factory for time-dependent unitary or Lindblad evolution.
 
         Solves ``dU/dt = -i [sum_i f_i(p_i, t) H_i] U``.  Thin delegator to
         :meth:`jaqsi.evolution.Evolution.evolve`.
 
         Args:
             name: Optional name for the produced :class:`Operation`.
-            **odeint_kwargs: Solver options forwarded to ``Evolution.evolve``
+            **odeint_kwargs: ``collapse_ops=[C, ...]`` includes constant collapse
+                matrices with square-root rates on these wires. Other options
+                are forwarded to ``Evolution.evolve``
                 (``atol``, ``rtol``, ``max_steps``, ``throw``, ``solver``,
                 ``magnus_steps``).
 

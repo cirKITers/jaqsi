@@ -1,6 +1,9 @@
 # Training
 
-Good news: a circuit executed through `Script` is a differentiable JAX function, so training follows the usual JAX workflow. Define a scalar cost, take its gradient with `jax.grad` or `jax.value_and_grad`, and pass the result to an optimizer such as [Optax](https://optax.readthedocs.io/). `jax.jit` can compile the update step for repeated calls.
+Training asks how a change in circuit or pulse parameters changes a measurable objective.
+For exact simulator outputs, `Script` exposes this dependence as a differentiable JAX function, so the same optimization workflow applies to ideal gates and noisy pulse evolution.
+Define a scalar cost, take its gradient with `jax.grad` or `jax.value_and_grad`, and pass the result to an optimizer such as [Optax](https://optax.readthedocs.io/).
+`jax.jit` can compile the update step for repeated calls.
 
 ## A minimal training loop
 
@@ -97,6 +100,10 @@ The method needs unitary gates and expectation values, so `Script` falls back to
 Forward-mode differentiation (`jax.jvp`, `jax.jacfwd`) falls back as well.
 This is detected from the arguments to `execute`, so keep any `jax.jit` outside the forward-mode transform.
 
+Lindblad channels use standard reverse-mode autodiff through the density-matrix circuit, since a unitary inverse cannot undo dissipation.
+Inside each pulse solve, Diffrax's [checkpointed differentiation](https://docs.kidger.site/diffrax/api/adjoints/) trades recomputation for memory.
+Both outputs and gradients depend on numerical solver accuracy, so check their convergence when optimizing controls.
+
 ## Training pulse parameters
 
 The same loop works one level lower, on the pulse parameters that define a gate.
@@ -134,9 +141,9 @@ def infidelity(pulse_params):
     return 1.0 - fidelity(target, pulse_state(pulse_params))
 ```
 
-Gradients flow through the ODE solver that integrates the pulse Hamiltonian, so the
-optimization is again a standard Optax loop.
-Starting from deliberately detuned parameters, it recovers the gate:
+Because the pulse Hamiltonian depends on `pulse_params`, gradients flow through the ODE solve to those controls.
+The optimization therefore uses the same Optax loop, now adjusting the pulse rather than the gate angle.
+Starting from deliberately detuned parameters, it recovers the target output state:
 
 ```python
 pulse_params = PulseInformation.gate_by_name("RX").params * 1.15
@@ -150,9 +157,9 @@ for _ in range(200):
 # infidelity 6.3e-02 -> ~1e-10
 ```
 
-That is the basic idea: gradients flow through the pulse ODE solver too. For full gate calibration, use `QOC`, which adds a multi-objective
-cost (fidelity and phase, plus optional pulse-width and evolution-time penalties), a
-parameter scan to pick the starting point, learning-rate scheduling and gradient clipping.
+Matching this one state does not yet establish that the pulse implements the intended gate on other inputs.
+For unitary gate calibration, `QOC` compares multiple probe states and combines fidelity and phase costs with optional pulse-width and evolution-time penalties.
+It also supplies a parameter scan to choose the starting point, learning-rate scheduling and gradient clipping.
 The shipped `qoc_results_<envelope>.csv` parameters were produced with that optimization process.
 
 ```python
@@ -164,3 +171,60 @@ qoc.optimize_all(sel_gates=["RX"], make_log=False)
 
 See the [pulses](pulses.md) page for the cost-function registry and the available
 envelopes, and the [references](references.md#quantum_optimal_control) for the full `QOC` API.
+
+## Training with noisy evolution
+
+Training with [open-system evolution](pulses.md#open_system_pulse_evolution) includes relaxation, dephasing and drive fluctuations in the objective.
+For preparation of a pure target $|\psi_{\rm target}\rangle$ from a noisy state $\rho(p)$, use
+
+$$
+L(p)=1-\langle\psi_{\rm target}|\rho(p)|\psi_{\rm target}\rangle.
+$$
+
+Minimizing this loss maximizes the probability of measuring the target state.
+For $|1\rangle$, it reduces to $1-P_1$, as in the pulse example.
+A nonzero minimum can reflect dissipation or control constraints.
+
+### Choosing the objective
+
+Matching one output state does not establish that a pulse implements the intended gate on other inputs.
+For gate calibration, average the preparation loss over several probes, comparing each channel output with the ideal target $U|\psi_j\rangle$.
+The six eigenstates of X, Y and Z cover both populations and coherences for one qubit.
+The QOC unitary and global-phase objectives are not mixed-state objectives, so define the noisy loss explicitly and optimize it with JAX/Optax.
+
+Use exact probabilities, density matrices or expectation values for these gradients.
+Sampled shots and discrete readout labels do not vary smoothly with controls.
+The mock's [exact interface](backend.md#drive_noise_and_gradients) supports differentiation, while its sampled readout tests finite-shot and classification effects.
+
+### Optimizing across noise realizations
+
+Optimizing one noise trace can favor controls that compensate only that particular error.
+For traces $\xi_r$ drawn from a control-independent distribution, average the losses and differentiate with those traces held fixed.
+
+$$
+\widehat L_N(p)=\frac1N\sum_{r=1}^{N}L(p;\xi_r),
+\qquad
+\nabla_p\widehat L_N=\frac1N\sum_{r=1}^{N}\nabla_pL(p;\xi_r).
+$$
+
+Each term must evolve a complete circuit to retain noise [correlations across gates and wires](noise.md#classical_drive_noise).
+Average losses directly, since applying a nonlinear loss to the averaged state can give a different objective.
+
+Keep circuit topology and noise traces fixed within each derivative evaluation while varying continuous controls such as amplitudes and durations.
+Traces may be resampled between optimization steps or reused as a training ensemble, but evaluate the result on independent traces to check that improvements generalize.
+
+### Checking a control gradient
+
+Compare autodiff with a centered finite difference using the same noise trace in both evaluations.
+
+$$
+\frac{\partial L}{\partial p_i}
+\approx\frac{L(p+h e_i;\xi)-L(p-h e_i;\xi)}{2h},
+$$
+
+where $e_i$ selects one control.
+Try several step sizes to balance truncation error against roundoff and solver error, then tighten ODE tolerances until both loss and gradient stabilize.
+For widths and durations, check the [pulse boundaries](pulses.md#pulse_boundaries_and_accuracy) as well, since tighter tolerances cannot repair a missing boundary derivative.
+
+For background on automatic differentiation in quantum control, see [Leung et al. (2017)](https://arxiv.org/abs/1612.04929).
+Related approaches include [trajectory-based open-system optimization](https://arxiv.org/abs/1901.05541) and [combined analytic and automatic differentiation](https://arxiv.org/abs/2205.15044), while JAQSI here differentiates deterministic density-matrix evolution.

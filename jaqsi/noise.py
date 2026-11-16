@@ -57,6 +57,15 @@ class KrausChannel(Operation):
         raise NotImplementedError
 
     @property
+    def superoperator(self) -> jnp.ndarray:
+        """Channel acting on a row-major flattened density matrix."""
+        dim = 4 ** len(self.wires)
+        return sum(
+            (jnp.kron(K, jnp.conj(K)) for K in self.kraus_matrices()),
+            jnp.zeros((dim, dim), dtype=cdtype()),
+        )
+
+    @property
     def matrix(self) -> jnp.ndarray:
         """Raises TypeError — noise channels have no single unitary matrix.
 
@@ -326,7 +335,7 @@ class ThermalRelaxationError(KrausChannel):
         Six Kraus operators built from p_z (phase-flip probability), p_r0
         (reset-to-|0\\rangle probability) and p_r1 (reset-to-|1\\rangle probability).
 
-    T_2 > T_1 (non-Markovian; Choi matrix decomposition):
+    T_1 < T_2 <= 2 T_1 (Choi matrix decomposition):
         The Choi matrix is assembled from the relaxation/dephasing rates, then
         diagonalised; Kraus operators are K_i = \sqrt \lambda_i · mat(v_i).
 
