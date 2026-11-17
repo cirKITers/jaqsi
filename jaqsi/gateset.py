@@ -156,7 +156,7 @@ class SWAP(Operation):
     """SWAP gate."""
 
     _matrix = np.array(
-        [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=cdtype()
+        [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]], dtype=np.complex128
     )
     _num_wires = 2
     _structure = GateStructure(permutation=(0, 2, 1, 3))

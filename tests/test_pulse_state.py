@@ -36,6 +36,30 @@ def test_hamiltonian_pi_factors_are_double_precision():
     assert PulseGates._H_CZ[3, 3] == np.pi
 
 
+@pytest.mark.parametrize("envelope", PulseEnvelope.available())
+def test_default_pulse_parameters_are_exact_host_arrays(envelope):
+    """Calibrated pulse defaults keep full precision whatever the active dtype.
+
+    :class:`PulseInformation` casts them to the active dtype when it builds
+    the leaf gates.
+    """
+    for gate, params in PulseEnvelope.get(envelope)["defaults"].items():
+        assert isinstance(params, np.ndarray), f"{envelope} {gate} pins its dtype"
+        assert params.dtype == np.float64
+
+
+def test_reset_inside_trace_keeps_leaf_params_concrete():
+    """Leaf pulse parameters are class state, so a trace must not leave tracers."""
+
+    @jax.jit
+    def f(x):
+        PulseInformation.reset_defaults()
+        return x
+
+    f(0.0)
+    assert not isinstance(PulseInformation.RX.params, jax.core.Tracer)
+
+
 def test_snapshot_restore_restores_config_and_leaf_params():
     snapshot = PulseInformation.snapshot_state()
     original_rx = PulseInformation.RX.params
