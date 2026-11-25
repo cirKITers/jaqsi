@@ -123,6 +123,9 @@ The Magnus integrators and the single-term drives return exactly unitary gates, 
 This matters for gradients of expectation values, which are computed with the adjoint method (see [training](training.md#how_gradients_are_computed)) and reconstruct intermediate states by inverting gates as unitaries.
 The resulting error grows linearly with the number of pulse gates, so for circuits with thousands of them prefer a Magnus solver.
 
+Note that double precision requires `jax.config.update("jax_enable_x64", True)` being set before importing jaqsi.
+Otherwise, default pulse parameters stay in single precision as they are built on import.
+
 Pulse gates are solved lazily when the circuit runs, rather than when they are recorded. Gates with the same pulse shape share one batched solve, while gates with identical parameters, such as repeated fixed-angle rotations, are solved only once. This avoids compiling a separate solver for each gate.
 
 ## Quantum Optimal Control
