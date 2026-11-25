@@ -421,16 +421,17 @@ class PulseEnvelope:
 
     # ``n_envelope_params`` counts only the envelope parameters (excluding
     # the evolution time ``t`` which is always the last element of the full
-    # pulse parameter vector).
+    # pulse parameter vector).  The defaults are exact host constants;
+    # :class:`PulseInformation` casts them when it builds the leaf gates.
     REGISTRY = {
         "gaussian": {
             "fn": gaussian.__func__,
             "n_envelope_params": 2,
             "defaults": {
-                "RX": jnp.array(
+                "RX": np.array(
                     [0.44506904345408577, 1.9072729604580203, 3.5213966860043175]
                 ),
-                "RY": jnp.array(
+                "RY": np.array(
                     [0.449245182920846, 1.8896592598281816, 3.4886409030956145]
                 ),
             },
@@ -439,10 +440,10 @@ class PulseEnvelope:
             "fn": square.__func__,
             "n_envelope_params": 2,
             "defaults": {
-                "RX": jnp.array(
+                "RX": np.array(
                     [1.209660477974627, 0.8266782440135297, 1.1483171598013935]
                 ),
-                "RY": jnp.array(
+                "RY": np.array(
                     [1.0260908021252053, 1.000371727035551, 0.9745726190714447]
                 ),
             },
@@ -451,10 +452,10 @@ class PulseEnvelope:
             "fn": cosine.__func__,
             "n_envelope_params": 2,
             "defaults": {
-                "RX": jnp.array(
+                "RX": np.array(
                     [1.4970963752879989, 1.1647261280710832, 0.8317222416617329]
                 ),
-                "RY": jnp.array(
+                "RY": np.array(
                     [1.4970963752879989, 1.1647261280710832, 0.8317222416617329]
                 ),
             },
@@ -464,7 +465,7 @@ class PulseEnvelope:
             "quadrature_fn": drag_quadrature.__func__,
             "n_envelope_params": 3,
             "defaults": {
-                "RX": jnp.array(
+                "RX": np.array(
                     [
                         0.4462644494309652,
                         5.56779671979968e-19,
@@ -472,7 +473,7 @@ class PulseEnvelope:
                         3.5141632250053174,
                     ]
                 ),
-                "RY": jnp.array(
+                "RY": np.array(
                     [
                         0.45045111802374943,
                         1.2007294980651857e-13,
@@ -486,10 +487,10 @@ class PulseEnvelope:
             "fn": sech.__func__,
             "n_envelope_params": 2,
             "defaults": {
-                "RX": jnp.array(
+                "RX": np.array(
                     [1.18559023969428, 1.5022530879336038, 0.8547640992860961]
                 ),
-                "RY": jnp.array(
+                "RY": np.array(
                     [1.18559023969428, 1.5022530879336038, 0.8547640992860961]
                 ),
             },
@@ -498,7 +499,7 @@ class PulseEnvelope:
             "fn": drag_legacy.__func__,
             "n_envelope_params": 3,
             "defaults": {
-                "RX": jnp.array(
+                "RX": np.array(
                     [
                         0.326562746114197,
                         0.4002767596709071,
@@ -506,7 +507,7 @@ class PulseEnvelope:
                         3.141300761986467,
                     ]
                 ),
-                "RY": jnp.array(
+                "RY": np.array(
                     [
                         0.323287924190616,
                         0.4065017233024265,
@@ -520,8 +521,8 @@ class PulseEnvelope:
             "fn": None,
             "n_envelope_params": 0,
             "defaults": {
-                "RZ": jnp.array([0.5]),
-                "CZ": jnp.array([0.3183098783513154]),
+                "RZ": np.array([0.5]),
+                "CZ": np.array([0.3183098783513154]),
             },
         },
     }
@@ -797,11 +798,14 @@ class PulseInformation:
         defaults = PulseEnvelope.get(cls._envelope)["defaults"]
         general = PulseEnvelope.get("general")["defaults"]
 
-        cls.RX = PulseParams(name="RX", params=defaults["RX"])
-        cls.RY = PulseParams(name="RY", params=defaults["RY"])
+        # Cast at compile time: the leaf parameters are class state and must
+        # not capture a tracer when rebuilt inside a trace.
+        with jax.ensure_compile_time_eval():
+            cls.RX = PulseParams(name="RX", params=jnp.asarray(defaults["RX"]))
+            cls.RY = PulseParams(name="RY", params=jnp.asarray(defaults["RY"]))
 
-        cls.RZ = PulseParams(name="RZ", params=general["RZ"])
-        cls.CZ = PulseParams(name="CZ", params=general["CZ"])
+            cls.RZ = PulseParams(name="RZ", params=jnp.asarray(general["RZ"]))
+            cls.CZ = PulseParams(name="CZ", params=jnp.asarray(general["CZ"]))
 
     @classmethod
     def _build_composite_gates(cls):

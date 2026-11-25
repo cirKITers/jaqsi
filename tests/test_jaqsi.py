@@ -3,7 +3,11 @@ import jax
 
 import jax.numpy as jnp
 import numpy as np
+import os
 import pickle
+import subprocess
+import sys
+import textwrap
 import time
 
 
@@ -1478,6 +1482,23 @@ class TestGateOperations:
             )
         wires = list(range(cls._num_wires or 1))
         assert cls(wires=wires).matrix.dtype == cdtype()
+
+    @pytest.mark.unittest
+    def test_constant_matrix_is_concrete_under_jit(self):
+        """A parameter-free matrix stays concrete inside a trace.
+
+        Callers read it at trace time, e.g. to hash an observable or to skip
+        the cotangent of a constant gate in the adjoint sweep.  A matrix that
+        depends on a traced parameter stays traced.
+        """
+
+        @jax.jit
+        def f(theta):
+            assert not isinstance(PauliX(wires=0).matrix, jax.core.Tracer)
+            assert isinstance(RX(theta, wires=0).matrix, jax.core.Tracer)
+            return theta
+
+        f(0.1)
 
     @pytest.mark.unittest
     def test_dagger(self):
@@ -3257,3 +3278,35 @@ def test_script_and_gates_pickle() -> None:
     assert jnp.allclose(result, expected)
 
     assert pickle.loads(pickle.dumps(Gates.RY)).__name__ == "RY"
+
+
+@pytest.mark.unittest
+def test_x64_enabled_after_import() -> None:
+    """Gates and pulse defaults follow x64 when it is enabled after import.
+
+    Values that are still built at import keep the precision of that time,
+    so :func:`~jaqsi.operations.cdtype` warns about the switch.
+    """
+    code = textwrap.dedent(
+        """
+        import warnings
+        import jax, numpy as np
+        from jaqsi.gateset import SWAP
+        from jaqsi.operations import cdtype
+        from jaqsi.pulses import PulseInformation
+
+        jax.config.update("jax_enable_x64", True)
+        assert SWAP._matrix.dtype == np.complex128
+        PulseInformation.reset_defaults()
+        assert PulseInformation.RX.params.dtype == np.float64
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cdtype()
+        assert any("jax_enable_x64" in str(w.message) for w in caught)
+        """
+    )
+    env = dict(os.environ, JAX_ENABLE_X64="0")
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr

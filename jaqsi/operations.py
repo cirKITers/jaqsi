@@ -10,6 +10,7 @@ symbolic Pauli/Clifford layer in :mod:`jaqsi.paulis`.
 from typing import Callable, List, NamedTuple, Optional, Tuple, Union
 from functools import lru_cache
 import string
+import warnings
 import numpy as np
 
 import jax
@@ -22,11 +23,23 @@ from jaqsi.tape import active_tape, recording  # noqa: F401 (re-export)
 #: JAX array, which during tracing is a tracer.
 Matrix = Union[np.ndarray, jnp.ndarray]
 
+#: Whether x64 was enabled when jaqsi was imported (see :func:`cdtype`).
+_IMPORT_X64 = jax.config.x64_enabled
+
 
 def cdtype():
     """Return the active JAX complex dtype
     (complex128 if x64 enabled, else complex64).
+
+    Warns if ``jax_enable_x64`` changed after jaqsi was imported, since values
+    built at import keep the precision of that time.
     """
+    if jax.config.x64_enabled != _IMPORT_X64:
+        warnings.warn(
+            "jax_enable_x64 changed after jaqsi was imported; values built at "
+            "import keep the previous precision. Set it before importing jaqsi.",
+            stacklevel=2,
+        )
     return jnp.complex128 if jax.config.x64_enabled else jnp.complex64
 
 
@@ -299,7 +312,8 @@ class Operation:
             The gate matrix as a JAX array in the active complex dtype (see
             :func:`cdtype`).  The cast happens here, not where ``_matrix`` is
             defined, so enabling ``jax_enable_x64`` after importing jaqsi still
-            gives complex128 gates.
+            gives complex128 gates.  It is evaluated at compile time, so a
+            constant matrix stays concrete inside a trace.
 
         Raises:
             NotImplementedError: If the subclass has not defined ``_matrix``.
@@ -308,7 +322,8 @@ class Operation:
             raise NotImplementedError(
                 f"{self.__class__.__name__} does not define a matrix."
             )
-        return jnp.asarray(self._matrix, dtype=cdtype())
+        with jax.ensure_compile_time_eval():
+            return jnp.asarray(self._matrix, dtype=cdtype())
 
     def decompose(self) -> List["Operation"]:
         """Decompose this operation into a list of more primitive operations.
